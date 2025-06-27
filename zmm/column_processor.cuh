@@ -193,6 +193,20 @@ public:
     void synchronize() {
         CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
+    
+    // 动态操作支持方法
+    float** getInputColumnPointers() {
+        std::vector<float*> host_ptrs(N);
+        for (int i = 0; i < N; ++i) {
+            host_ptrs[i] = input_columns_[i].data();
+        }
+        // 返回设备上的列指针数组
+        return d_column_ptrs_.data();
+    }
+    
+    float* getOutputPointer() {
+        return output_column_.data();
+    }
 };
 
 // 预定义的常用操作符
