@@ -1,3 +1,31 @@
+#!/bin/bash
+
+# ZMM CUDA 混合类型框架构建脚本
+
+echo "开始构建 ZMM CUDA 混合类型处理框架..."
+
+# 检查CUDA是否可用
+if ! command -v nvcc &> /dev/null; then
+    echo "错误: 未找到 nvcc，请确保安装了CUDA Toolkit"
+    exit 1
+fi
+
+# 显示CUDA版本
+echo "CUDA版本信息:"
+nvcc --version
+
+# 创建构建目录
+if [ ! -d "build_mixed" ]; then
+    mkdir build_mixed
+fi
+
+cd build_mixed
+
+# 配置CMake（使用混合类型配置）
+echo "配置项目..."
+
+# 创建专用的CMakeLists.txt文件用于混合类型
+cat > ../CMakeLists_mixed.txt << 'EOF'
 cmake_minimum_required(VERSION 3.12)
 project(ZMM_Mixed_Types LANGUAGES CXX CUDA)
 
@@ -126,3 +154,89 @@ add_custom_target(show_mixed_help
     COMMAND ${CMAKE_COMMAND} -E echo "  build_all_mixed      - 构建所有混合类型目标"
     COMMAND ${CMAKE_COMMAND} -E echo "  performance_comparison - 运行性能对比测试"
 )
+EOF
+
+cp ../CMakeLists_mixed.txt ../CMakeLists.txt.backup
+cp ../CMakeLists_mixed.txt ../CMakeLists.txt
+cmake .. -DCMAKE_BUILD_TYPE=Release
+
+# 编译
+echo "开始编译..."
+make -j$(nproc)
+
+if [ $? -eq 0 ]; then
+    echo "编译成功！"
+    echo ""
+    echo "生成的文件："
+    echo "库文件："
+    echo "  - lib/libzmm_mixed_types.a    - 混合类型核心库"
+    echo ""
+    echo "可执行文件："
+    echo "  - bin/mixed_example          - 混合类型示例程序"
+    echo "  - bin/example                - 原始框架示例(性能对比)"
+    echo "  - bin/simple_example         - 原始简单示例(性能对比)"
+    echo ""
+    echo "运行混合类型示例："
+    echo "  cd build_mixed && ./bin/mixed_example"
+    echo ""
+    echo "运行性能对比测试："
+    echo "  cd build_mixed && make performance_comparison"
+    echo ""
+    echo "显示帮助信息："
+    echo "  cd build_mixed && make show_mixed_help"
+else
+    echo "编译失败！"
+    exit 1
+fi
+
+# 运行一些基本检查
+echo "进行基本检查..."
+
+# 检查库文件
+if [ -f "./lib/libzmm_mixed_types.a" ]; then
+    echo "✓ 混合类型核心库已生成"
+    size_info=$(ls -lh ./lib/libzmm_mixed_types.a | awk '{print $5}')
+    echo "  库文件大小: $size_info"
+else
+    echo "✗ 混合类型核心库生成失败"
+fi
+
+# 检查可执行文件
+if [ -f "./bin/mixed_example" ]; then
+    echo "✓ 混合类型示例程序已生成"
+    
+    # 尝试运行一个简单的测试
+    echo "运行快速验证测试..."
+    timeout 10s ./bin/mixed_example > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo "✓ 混合类型示例程序运行正常"
+    else
+        echo "⚠ 混合类型示例程序运行可能有问题，请手动测试"
+    fi
+else
+    echo "✗ 混合类型示例程序生成失败"
+fi
+
+echo "构建完成！"
+
+# 恢复原始CMakeLists.txt
+if [ -f "../CMakeLists.txt.backup" ]; then
+    mv ../CMakeLists.txt.backup ../CMakeLists.txt
+    echo "已恢复原始CMakeLists.txt"
+fi
+
+# 提供使用建议
+echo ""
+echo "使用建议："
+echo "1. 运行混合类型示例："
+echo "   ./bin/mixed_example"
+echo ""
+echo "2. 进行性能对比测试："
+echo "   make performance_comparison"
+echo ""
+echo "3. 集成到现有项目："
+echo "   - 链接库: libzmm_mixed_types.a"
+echo "   - 包含头文件: mixed_column_processor.cuh"
+echo ""
+echo "4. 查看详细文档："
+echo "   cat ../MIXED_TYPES_README.md"
