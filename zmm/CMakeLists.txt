@@ -49,6 +49,14 @@ set_target_properties(zmm_mixed_types PROPERTIES
 add_executable(mixed_example mixed_example.cu)
 target_link_libraries(mixed_example zmm_mixed_types CUDA::cudart)
 
+# 基于名称访问的测试程序
+add_executable(mixed_named_test mixed_named_test.cu)
+target_link_libraries(mixed_named_test zmm_mixed_types CUDA::cudart)
+
+# 针对命名 Operation 类的测试程序
+add_executable(mixed_named_ops_test mixed_named_ops_test.cu)
+target_link_libraries(mixed_named_ops_test zmm_mixed_types CUDA::cudart)
+
 # 保留原有示例程序（用于性能对比）
 add_executable(example example.cu)
 add_executable(simple_example simple_example.cu)
@@ -99,6 +107,8 @@ message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 # 添加测试目标
 enable_testing()
 add_test(NAME mixed_test COMMAND mixed_example)
+add_test(NAME mixed_named_test COMMAND mixed_named_test)
+add_test(NAME mixed_named_ops_test COMMAND mixed_named_ops_test)
 add_test(NAME simple_test COMMAND simple_example)
 add_test(NAME full_test COMMAND example)
 

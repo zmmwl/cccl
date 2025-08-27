@@ -142,14 +142,18 @@ public:
 struct MixedRowData {
     void** column_ptrs;         // 指向各列数据的指针数组
     ColumnDataType* types;      // 各列的数据类型
+    uint32_t* name_hashes;      // 各列名称的哈希（可选）
     int num_columns;           // 列数
     size_t row_index;          // 当前行索引
     
     __device__ __host__ MixedRowData() 
-        : column_ptrs(nullptr), types(nullptr), num_columns(0), row_index(0) {}
+        : column_ptrs(nullptr), types(nullptr), name_hashes(nullptr), num_columns(0), row_index(0) {}
     
     __device__ __host__ MixedRowData(void** ptrs, ColumnDataType* t, int n, size_t idx)
-        : column_ptrs(ptrs), types(t), num_columns(n), row_index(idx) {}
+        : column_ptrs(ptrs), types(t), name_hashes(nullptr), num_columns(n), row_index(idx) {}
+
+    __device__ __host__ MixedRowData(void** ptrs, ColumnDataType* t, uint32_t* hashes, int n, size_t idx)
+        : column_ptrs(ptrs), types(t), name_hashes(hashes), num_columns(n), row_index(idx) {}
     
     // 获取指定列的浮点值
     __device__ __host__ float getFloat(int column_index) const {
@@ -174,6 +178,47 @@ struct MixedRowData {
             return FixedString<MAX_LEN>(); // 返回默认构造的对象
         }
         return ((FixedString<MAX_LEN>*)column_ptrs[column_index])[row_index];
+    }
+
+    // 名称到索引的解析（基于FNV-1a 32位哈希）
+    __device__ __host__ static inline uint32_t hashColumnName(const char* name) {
+        // FNV-1a 32-bit
+        const uint32_t FNV_OFFSET_BASIS = 2166136261u;
+        const uint32_t FNV_PRIME = 16777619u;
+        if (name == nullptr) return 0u;
+        uint32_t hash = FNV_OFFSET_BASIS;
+        for (const unsigned char* p = (const unsigned char*)name; *p != '\0'; ++p) {
+            hash ^= (uint32_t)(*p);
+            hash *= FNV_PRIME;
+        }
+        return hash;
+    }
+
+    __device__ __host__ int getColumnIndexByName(const char* name) const {
+        if (name_hashes == nullptr || name == nullptr) return -1;
+        uint32_t target = hashColumnName(name);
+        for (int i = 0; i < num_columns; ++i) {
+            if (name_hashes[i] == target) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    __device__ __host__ float getFloat(const char* column_name) const {
+        int idx = getColumnIndexByName(column_name);
+        return idx >= 0 ? getFloat(idx) : 0.0f;
+    }
+
+    __device__ __host__ GPUString getString(const char* column_name) const {
+        int idx = getColumnIndexByName(column_name);
+        return idx >= 0 ? getString(idx) : GPUString();
+    }
+
+    template<int MAX_LEN>
+    __device__ __host__ FixedString<MAX_LEN> getFixedString(const char* column_name) const {
+        int idx = getColumnIndexByName(column_name);
+        return idx >= 0 ? getFixedString<MAX_LEN>(idx) : FixedString<MAX_LEN>();
     }
 };
 

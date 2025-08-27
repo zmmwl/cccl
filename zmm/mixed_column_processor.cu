@@ -11,6 +11,7 @@ MixedColumnProcessor::MixedColumnProcessor(size_t num_elements)
     : num_elements_(num_elements)
     , d_column_ptrs_(nullptr)
     , d_column_types_(nullptr)
+    , d_column_name_hashes_(nullptr)
     , d_output_(nullptr)
     , stream_(nullptr)
     , last_compute_time_ms_(0.0f)
@@ -42,6 +43,7 @@ MixedColumnProcessor::MixedColumnProcessor(MixedColumnProcessor&& other) noexcep
     , column_types_(std::move(other.column_types_))
     , d_column_ptrs_(other.d_column_ptrs_)
     , d_column_types_(other.d_column_types_)
+    , d_column_name_hashes_(other.d_column_name_hashes_)
     , d_output_(other.d_output_)
     , stream_(other.stream_)
     , last_compute_time_ms_(other.last_compute_time_ms_)
@@ -50,6 +52,7 @@ MixedColumnProcessor::MixedColumnProcessor(MixedColumnProcessor&& other) noexcep
     // 清空源对象
     other.d_column_ptrs_ = nullptr;
     other.d_column_types_ = nullptr;
+    other.d_column_name_hashes_ = nullptr;
     other.d_output_ = nullptr;
     other.stream_ = nullptr;
 }
@@ -69,6 +72,7 @@ MixedColumnProcessor& MixedColumnProcessor::operator=(MixedColumnProcessor&& oth
         column_types_ = std::move(other.column_types_);
         d_column_ptrs_ = other.d_column_ptrs_;
         d_column_types_ = other.d_column_types_;
+        d_column_name_hashes_ = other.d_column_name_hashes_;
         d_output_ = other.d_output_;
         stream_ = other.stream_;
         last_compute_time_ms_ = other.last_compute_time_ms_;
@@ -77,6 +81,7 @@ MixedColumnProcessor& MixedColumnProcessor::operator=(MixedColumnProcessor&& oth
         // 清空源对象
         other.d_column_ptrs_ = nullptr;
         other.d_column_types_ = nullptr;
+        other.d_column_name_hashes_ = nullptr;
         other.d_output_ = nullptr;
         other.stream_ = nullptr;
     }
@@ -98,6 +103,7 @@ int MixedColumnProcessor::addFloatColumn(const std::vector<float>& data) {
         int column_index = static_cast<int>(columns_.size());
         columns_.push_back(std::move(column));
         column_types_.push_back(ColumnDataType::FLOAT);
+        column_name_hashes_.push_back(0u);
         
         updateDeviceMetadata();
         return column_index;
@@ -105,6 +111,26 @@ int MixedColumnProcessor::addFloatColumn(const std::vector<float>& data) {
         std::cerr << "MixedColumnProcessor: Failed to add float column: " << e.what() << std::endl;
         return -1;
     }
+}
+
+int MixedColumnProcessor::addNamedFloatColumn(const std::string& name, const std::vector<float>& data) {
+    int idx = addFloatColumn(data);
+    if (idx >= 0) {
+        name_to_index_[name] = idx;
+        if (column_name_hashes_.size() < columns_.size()) column_name_hashes_.resize(columns_.size());
+        column_name_hashes_[static_cast<size_t>(idx)] = MixedRowData::hashColumnName(name.c_str());
+        updateDeviceMetadata();
+    }
+    return idx;
+}
+
+int MixedColumnProcessor::addNamedFloatColumn(const std::string& name, const float* data, size_t size) {
+    if (size != num_elements_) {
+        std::cerr << "MixedColumnProcessor: Data size mismatch" << std::endl;
+        return -1;
+    }
+    std::vector<float> vec_data(data, data + size);
+    return addNamedFloatColumn(name, vec_data);
 }
 
 int MixedColumnProcessor::addFloatColumn(const float* data, size_t size) {
@@ -138,6 +164,7 @@ int MixedColumnProcessor::addStringColumn(const std::vector<std::string>& data) 
         int column_index = static_cast<int>(columns_.size());
         columns_.push_back(std::move(column));
         column_types_.push_back(ColumnDataType::STRING);
+        column_name_hashes_.push_back(0u);
         
         updateDeviceMetadata();
         return column_index;
@@ -145,6 +172,17 @@ int MixedColumnProcessor::addStringColumn(const std::vector<std::string>& data) 
         std::cerr << "MixedColumnProcessor: Failed to add string column: " << e.what() << std::endl;
         return -1;
     }
+}
+
+int MixedColumnProcessor::addNamedStringColumn(const std::string& name, const std::vector<std::string>& data) {
+    int idx = addStringColumn(data);
+    if (idx >= 0) {
+        name_to_index_[name] = idx;
+        if (column_name_hashes_.size() < columns_.size()) column_name_hashes_.resize(columns_.size());
+        column_name_hashes_[static_cast<size_t>(idx)] = MixedRowData::hashColumnName(name.c_str());
+        updateDeviceMetadata();
+    }
+    return idx;
 }
 
 // 通用添加列方法
@@ -170,12 +208,29 @@ int MixedColumnProcessor::addColumn(ColumnDataType type, const void* data, size_
     }
 }
 
+int MixedColumnProcessor::addNamedColumn(const std::string& name, ColumnDataType type, const void* data, size_t size) {
+    int idx = addColumn(type, data, size);
+    if (idx >= 0) {
+        name_to_index_[name] = idx;
+        if (column_name_hashes_.size() < columns_.size()) column_name_hashes_.resize(columns_.size());
+        column_name_hashes_[static_cast<size_t>(idx)] = MixedRowData::hashColumnName(name.c_str());
+        updateDeviceMetadata();
+    }
+    return idx;
+}
+
 // 获取列类型
 ColumnDataType MixedColumnProcessor::getColumnType(int column_index) const {
     if (!validateColumnIndex(column_index)) {
         return ColumnDataType::FLOAT; // 默认返回
     }
     return column_types_[column_index];
+}
+
+int MixedColumnProcessor::getColumnIndexByName(const std::string& name) const {
+    auto it = name_to_index_.find(name);
+    if (it == name_to_index_.end()) return -1;
+    return it->second;
 }
 
 // 更新浮点列数据
@@ -241,6 +296,10 @@ bool MixedColumnProcessor::compute(const IMixedOperation& operation) {
         success = computeWithFunctor(ConditionalMixedFunctor{});
     } else if (strcmp(op_name, "EcommerceScoreOperation") == 0) {
         success = computeWithFunctor(EcommerceScoreFunctor{});
+    } else if (strcmp(op_name, "NamedPriceRatingSumOperation") == 0) {
+        success = computeWithFunctor(NamedPriceRatingSumFunctor{});
+    } else if (strcmp(op_name, "NamedEcommerceScoreOperation") == 0) {
+        success = computeWithFunctor(NamedEcommerceScoreFunctor{});
     } else {
         // 默认使用条件分支内核
         success = computeConditional(0);
@@ -435,10 +494,14 @@ void MixedColumnProcessor::updateDeviceMetadata() {
     // 准备主机端数据
     std::vector<void*> host_column_ptrs(columns_.size());
     std::vector<ColumnDataType> host_column_types(columns_.size());
+    std::vector<uint32_t> host_name_hashes(columns_.size());
     
     for (size_t i = 0; i < columns_.size(); ++i) {
         host_column_ptrs[i] = columns_[i]->getDevicePointer();
         host_column_types[i] = column_types_[i];
+        uint32_t h = 0u;
+        if (i < column_name_hashes_.size()) h = column_name_hashes_[i];
+        host_name_hashes[i] = h;
     }
     
     // 复制到设备
@@ -446,6 +509,11 @@ void MixedColumnProcessor::updateDeviceMetadata() {
                          columns_.size() * sizeof(void*), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_column_types_, host_column_types.data(), 
                          columns_.size() * sizeof(ColumnDataType), cudaMemcpyHostToDevice));
+    if (d_column_name_hashes_ == nullptr) {
+        CUDA_CHECK(cudaMalloc(&d_column_name_hashes_, columns_.size() * sizeof(uint32_t)));
+    }
+    CUDA_CHECK(cudaMemcpy(d_column_name_hashes_, host_name_hashes.data(),
+                         columns_.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
 }
 
 void MixedColumnProcessor::cleanupDeviceMemory() {
@@ -454,6 +522,10 @@ void MixedColumnProcessor::cleanupDeviceMemory() {
     if (d_output_) {
         cudaFree(d_output_);
         d_output_ = nullptr;
+    }
+    if (d_column_name_hashes_) {
+        cudaFree(d_column_name_hashes_);
+        d_column_name_hashes_ = nullptr;
     }
 }
 
@@ -476,6 +548,9 @@ bool MixedColumnProcessor::allocateDeviceMetadata() {
     if (d_column_types_ == nullptr && !columns_.empty()) {
         CUDA_CHECK(cudaMalloc(&d_column_types_, columns_.size() * sizeof(ColumnDataType)));
     }
+    if (d_column_name_hashes_ == nullptr && !columns_.empty()) {
+        CUDA_CHECK(cudaMalloc(&d_column_name_hashes_, columns_.size() * sizeof(uint32_t)));
+    }
     return true;
 }
 
@@ -487,6 +562,10 @@ void MixedColumnProcessor::freeDeviceMetadata() {
     if (d_column_types_) {
         cudaFree(d_column_types_);
         d_column_types_ = nullptr;
+    }
+    if (d_column_name_hashes_) {
+        cudaFree(d_column_name_hashes_);
+        d_column_name_hashes_ = nullptr;
     }
 }
 

@@ -7,6 +7,7 @@ namespace zmm {
 __global__ void mixed_compute_kernel(
     void** column_ptrs,
     ColumnDataType* column_types,
+    uint32_t* column_name_hashes,
     int num_columns,
     size_t num_elements,
     float* output,

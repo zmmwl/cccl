@@ -74,6 +74,55 @@ void demonstrateBasicUsage() {
     std::cout << "基础使用演示完成。" << std::endl;
 }
 
+void demonstrateNamedAccess() {
+    std::cout << "\n=== 按字段名访问演示 ===" << std::endl;
+    const size_t num_elements = 8192;
+
+    auto processor = createMixedProcessor(num_elements);
+    
+    // 构造数据
+    std::vector<float> prices(num_elements);
+    std::vector<float> ratings(num_elements);
+    std::vector<std::string> categories(num_elements);
+    std::vector<std::string> brands(num_elements);
+    for (size_t i = 0; i < num_elements; ++i) {
+        prices[i] = 10.0f + static_cast<float>(i % 100) * 0.25f;
+        ratings[i] = 1.0f + static_cast<float>(i % 5) * 0.5f;
+        categories[i] = (i % 2 == 0) ? std::string("electronics") : std::string("books");
+        brands[i] = (i % 3 == 0) ? std::string("premium") : std::string("generic");
+    }
+
+    // 以名称添加列
+    processor->addNamedFloatColumn("price", prices);
+    processor->addNamedFloatColumn("rating", ratings);
+    processor->addNamedStringColumn("category", categories);
+    processor->addNamedStringColumn("brand", brands);
+
+    // 使用Functor通过字段名访问
+    bool ok = processor->computeWithFunctor(NamedPriceRatingSumFunctor{});
+    processor->synchronize();
+    if (!ok) {
+        std::cout << "Named functor compute failed" << std::endl;
+        return;
+    }
+    auto result_sum = processor->getResult();
+    std::cout << "price+rating（前5个）: ";
+    for (int i = 0; i < 5; ++i) {
+        std::cout << std::fixed << std::setprecision(2) << result_sum[i] << (i < 4 ? ", " : "\n");
+    }
+
+    // 使用命名电商评分Functor
+    ok = processor->computeWithFunctor(NamedEcommerceScoreFunctor{});
+    processor->synchronize();
+    if (ok) {
+        auto scores = processor->getResult();
+        std::cout << "Named EcommerceScore（前5个）: ";
+        for (int i = 0; i < 5; ++i) {
+            std::cout << std::fixed << std::setprecision(2) << scores[i] << (i < 4 ? ", " : "\n");
+        }
+    }
+}
+
 void demonstrateOperations() {
     std::cout << "\n=== 操作演示 ===" << std::endl;
     
@@ -339,6 +388,7 @@ int main() {
         // 运行各种演示
         demonstrateBasicUsage();
         demonstrateOperations();
+        demonstrateNamedAccess();
         demonstrateEcommerceScenario();
         demonstratePerformanceBenchmark();
         demonstrateBuilderPattern();

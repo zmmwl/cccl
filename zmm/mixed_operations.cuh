@@ -418,4 +418,68 @@ struct EcommerceScoreFunctor {
     }
 };
 
+// ===== 使用字段名访问的操作（类 + Functor） =====
+
+// 使用字段名访问的简单求和操作：price + rating
+class NamedPriceRatingSumOperation : public BaseMixedOperation {
+public:
+    __device__ __host__ float execute(const MixedRowData& row) const override {
+        float price = row.getFloat("price");
+        float rating = row.getFloat("rating");
+        return price + rating;
+    }
+    const char* getName() const override { return "NamedPriceRatingSumOperation"; }
+};
+
+// 使用字段名的电商评分：与EcommerceScoreOperation相同逻辑，但按名称取列
+class NamedEcommerceScoreOperation : public BaseMixedOperation {
+public:
+    __device__ __host__ float execute(const MixedRowData& row) const override {
+        float price = row.getFloat("price");
+        float rating = row.getFloat("rating");
+        GPUString category = row.getString("category");
+        GPUString brand = row.getString("brand");
+
+        float category_multiplier = 1.0f;
+        if (gpu_string_equals(category, "electronics")) category_multiplier = 1.2f;
+        else if (gpu_string_equals(category, "luxury")) category_multiplier = 1.5f;
+
+        float brand_bonus = 0.0f;
+        if (gpu_string_equals(brand, "premium")) brand_bonus = 10.0f;
+
+        float base_score = rating * 7.0f;
+        float price_factor = (price > 0) ? (100.0f / price) : 0.0f;
+        return (base_score + price_factor * 2.0f + brand_bonus) * category_multiplier;
+    }
+    const char* getName() const override { return "NamedEcommerceScoreOperation"; }
+};
+
+// Device functor: 使用字段名访问的简单求和
+struct NamedPriceRatingSumFunctor {
+    __device__ float operator()(const MixedRowData& row) const {
+        return row.getFloat("price") + row.getFloat("rating");
+    }
+};
+
+// Device functor: 使用字段名访问的电商评分
+struct NamedEcommerceScoreFunctor {
+    __device__ float operator()(const MixedRowData& row) const {
+        float price = row.getFloat("price");
+        float rating = row.getFloat("rating");
+        GPUString category = row.getString("category");
+        GPUString brand = row.getString("brand");
+
+        float category_multiplier = 1.0f;
+        if (gpu_string_equals(category, "electronics")) category_multiplier = 1.2f;
+        else if (gpu_string_equals(category, "luxury")) category_multiplier = 1.5f;
+
+        float brand_bonus = 0.0f;
+        if (gpu_string_equals(brand, "premium")) brand_bonus = 10.0f;
+
+        float base_score = rating * 7.0f;
+        float price_factor = (price > 0) ? (100.0f / price) : 0.0f;
+        return (base_score + price_factor * 2.0f + brand_bonus) * category_multiplier;
+    }
+};
+
 } // namespace zmm

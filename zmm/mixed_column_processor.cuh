@@ -16,10 +16,13 @@ private:
     size_t num_elements_;
     std::vector<std::unique_ptr<IColumn>> columns_;
     std::vector<ColumnDataType> column_types_;
+    std::vector<uint32_t> column_name_hashes_; // 列名哈希（与列顺序对应）
+    std::unordered_map<std::string, int> name_to_index_; // 主机端映射
     
     // 设备端的元数据
     void** d_column_ptrs_;              // 设备上各列数据指针数组
     ColumnDataType* d_column_types_;    // 设备上各列类型数组
+    uint32_t* d_column_name_hashes_;    // 设备上列名哈希数组（可为空）
     float* d_output_;                   // 设备上的输出数组
     
     // CUDA流
@@ -46,9 +49,12 @@ public:
     // 添加浮点列
     int addFloatColumn(const std::vector<float>& data);
     int addFloatColumn(const float* data, size_t size);
+    int addNamedFloatColumn(const std::string& name, const std::vector<float>& data);
+    int addNamedFloatColumn(const std::string& name, const float* data, size_t size);
     
     // 添加字符串列
     int addStringColumn(const std::vector<std::string>& data);
+    int addNamedStringColumn(const std::string& name, const std::vector<std::string>& data);
     
     // 添加固定长度字符串列
     template<int MAX_LEN = 256>
@@ -56,11 +62,13 @@ public:
     
     // 通用添加列方法
     int addColumn(ColumnDataType type, const void* data, size_t size);
+    int addNamedColumn(const std::string& name, ColumnDataType type, const void* data, size_t size);
     
     // 获取列信息
     size_t getNumColumns() const { return columns_.size(); }
     size_t getNumElements() const { return num_elements_; }
     ColumnDataType getColumnType(int column_index) const;
+    int getColumnIndexByName(const std::string& name) const;
     
     // 更新列数据
     bool updateFloatColumn(int column_index, const std::vector<float>& data);
@@ -165,6 +173,7 @@ bool MixedColumnProcessor::computeWithFunctor(FunctorType functor) {
     cudaError_t result = kernel_launcher::launch_mixed_compute_kernel(
         d_column_ptrs_,
         d_column_types_,
+        d_column_name_hashes_,
         static_cast<int>(columns_.size()),
         num_elements_,
         d_output_,
@@ -194,6 +203,7 @@ bool MixedColumnProcessor::computeAsync(FunctorType functor) {
     cudaError_t result = kernel_launcher::launch_mixed_compute_kernel(
         d_column_ptrs_,
         d_column_types_,
+        d_column_name_hashes_,
         static_cast<int>(columns_.size()),
         num_elements_,
         d_output_,

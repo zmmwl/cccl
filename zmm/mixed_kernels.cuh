@@ -9,6 +9,7 @@ namespace zmm {
 __global__ void mixed_compute_kernel(
     void** column_ptrs,           // 各列数据的设备指针数组
     ColumnDataType* column_types, // 各列的数据类型数组
+    uint32_t* column_name_hashes, // 各列名称哈希（可为null）
     int num_columns,             // 列数
     size_t num_elements,         // 元素数量
     float* output,               // 输出数组
@@ -20,6 +21,7 @@ template<typename OperationFunc>
 __global__ void mixed_compute_kernel_with_op(
     void** column_ptrs,           // 各列数据的设备指针数组
     ColumnDataType* column_types, // 各列的数据类型数组
+    uint32_t* column_name_hashes, // 各列名称哈希（可为null）
     int num_columns,             // 列数
     size_t num_elements,         // 元素数量
     float* output,               // 输出数组
@@ -30,7 +32,7 @@ __global__ void mixed_compute_kernel_with_op(
     
     for (size_t i = idx; i < num_elements; i += stride) {
         // 构造当前行的混合数据
-        MixedRowData row(column_ptrs, column_types, num_columns, i);
+        MixedRowData row(column_ptrs, column_types, column_name_hashes, num_columns, i);
         
         // 应用操作并存储结果
         output[i] = operation(row);
@@ -231,6 +233,7 @@ template<typename OperationFunc>
 cudaError_t launch_mixed_compute_kernel(
     void** column_ptrs,
     ColumnDataType* column_types,
+    uint32_t* column_name_hashes,
     int num_columns,
     size_t num_elements,
     float* output,
@@ -241,7 +244,7 @@ cudaError_t launch_mixed_compute_kernel(
     calculate_launch_config(num_elements, num_blocks, block_size);
     
     mixed_compute_kernel_with_op<<<num_blocks, block_size, 0, stream>>>(
-        column_ptrs, column_types, num_columns, num_elements, output, operation
+        column_ptrs, column_types, column_name_hashes, num_columns, num_elements, output, operation
     );
     
     return cudaGetLastError();
