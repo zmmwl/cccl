@@ -78,10 +78,6 @@ add_executable(mixed_example mixed_example.cu)
 target_link_libraries(mixed_example zmm_mixed_types CUDA::cudart)
 
 # 保留原有示例程序（用于性能对比）
-add_executable(example example.cu)
-add_executable(simple_example simple_example.cu)
-target_link_libraries(example CUDA::cudart)
-target_link_libraries(simple_example CUDA::cudart)
 
 # 设置编译器特定选项
 if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
@@ -90,14 +86,6 @@ if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
     target_compile_options(mixed_example PRIVATE 
-        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-    )
-    target_compile_options(example PRIVATE 
-        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-    )
-    target_compile_options(simple_example PRIVATE 
         $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
@@ -110,9 +98,9 @@ set(MIXED_HEADER_FILES
     mixed_operations.cuh
     mixed_column_processor.cuh
     # 原有头文件
-    column_processor.cuh
-    operations_interface.h
-    dynamic_processor.h
+    # column_processor.cuh
+    # operations_interface.h
+    # dynamic_processor.h
 )
 
 # 创建一个仅包含头文件的目标，方便IDE显示
@@ -127,21 +115,17 @@ message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 # 添加测试目标
 enable_testing()
 add_test(NAME mixed_test COMMAND mixed_example)
-add_test(NAME simple_test COMMAND simple_example)
-add_test(NAME full_test COMMAND example)
 
 # 自定义目标：构建所有
 add_custom_target(build_all_mixed 
-    DEPENDS zmm_mixed_types mixed_example example simple_example
+    DEPENDS zmm_mixed_types mixed_example 
 )
 
 # 性能对比目标
 add_custom_target(performance_comparison
     COMMAND echo "运行原始框架性能测试..."
-    COMMAND ./bin/example
     COMMAND echo "运行混合类型框架性能测试..."
     COMMAND ./bin/mixed_example
-    DEPENDS example mixed_example
 )
 
 # 帮助信息
@@ -149,8 +133,6 @@ add_custom_target(show_mixed_help
     COMMAND ${CMAKE_COMMAND} -E echo "可用目标："
     COMMAND ${CMAKE_COMMAND} -E echo "  zmm_mixed_types      - 混合类型核心库"
     COMMAND ${CMAKE_COMMAND} -E echo "  mixed_example        - 混合类型示例程序"
-    COMMAND ${CMAKE_COMMAND} -E echo "  example              - 原始框架示例(对比用)"
-    COMMAND ${CMAKE_COMMAND} -E echo "  simple_example       - 原始简单示例(对比用)"
     COMMAND ${CMAKE_COMMAND} -E echo "  build_all_mixed      - 构建所有混合类型目标"
     COMMAND ${CMAKE_COMMAND} -E echo "  performance_comparison - 运行性能对比测试"
 )
@@ -173,8 +155,6 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "可执行文件："
     echo "  - bin/mixed_example          - 混合类型示例程序"
-    echo "  - bin/example                - 原始框架示例(性能对比)"
-    echo "  - bin/simple_example         - 原始简单示例(性能对比)"
     echo ""
     echo "运行混合类型示例："
     echo "  cd build_mixed && ./bin/mixed_example"
