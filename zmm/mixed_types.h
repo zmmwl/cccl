@@ -89,6 +89,29 @@ public:
     std::vector<float> getData() const;
 };
 
+// 整数列实现
+class IntColumn : public IColumn {
+private:
+    int* d_data_;
+    size_t num_elements_;
+    
+public:
+    IntColumn(size_t num_elements);
+    ~IntColumn();
+    
+    ColumnDataType getType() const override { return ColumnDataType::INT; }
+    void* getDevicePointer() override { return d_data_; }
+    const void* getDevicePointer() const override { return d_data_; }
+    size_t getElementSize() const override { return sizeof(int); }
+    size_t getNumElements() const override { return num_elements_; }
+    
+    void copyFromHost(const void* host_data, size_t num_elements) override;
+    void copyToHost(void* host_data) const override;
+    
+    void setData(const std::vector<int>& data);
+    std::vector<int> getData() const;
+};
+
 // 字符串列实现
 class StringColumn : public IColumn {
 private:
@@ -161,6 +184,14 @@ struct MixedRowData {
             return 0.0f;
         }
         return ((float*)column_ptrs[column_index])[row_index];
+    }
+    
+    // 获取指定列的整数值
+    __device__ __host__ int getInt(int column_index) const {
+        if (column_index >= num_columns || types[column_index] != ColumnDataType::INT) {
+            return 0;
+        }
+        return ((int*)column_ptrs[column_index])[row_index];
     }
     
     // 获取指定列的字符串

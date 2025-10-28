@@ -1,4 +1,5 @@
 #include "mixed_column_processor.cuh"
+#include <cub/cub.cuh>
 #include <chrono>
 #include <algorithm>
 #include <iomanip>
@@ -141,6 +142,61 @@ int MixedColumnProcessor::addFloatColumn(const float* data, size_t size) {
     
     std::vector<float> vec_data(data, data + size);
     return addFloatColumn(vec_data);
+}
+
+// 添加整数列
+int MixedColumnProcessor::addIntColumn(const std::vector<int>& data) {
+    if (data.size() != num_elements_) {
+        std::cerr << "MixedColumnProcessor: Data size mismatch, expected " 
+                  << num_elements_ << " but got " << data.size() << std::endl;
+        return -1;
+    }
+    
+    try {
+        auto column = std::make_unique<IntColumn>(num_elements_);
+        column->setData(data);
+        
+        int column_index = static_cast<int>(columns_.size());
+        columns_.push_back(std::move(column));
+        column_types_.push_back(ColumnDataType::INT);
+        column_name_hashes_.push_back(0u);
+        
+        updateDeviceMetadata();
+        return column_index;
+    } catch (const std::exception& e) {
+        std::cerr << "MixedColumnProcessor: Failed to add int column: " << e.what() << std::endl;
+        return -1;
+    }
+}
+
+int MixedColumnProcessor::addNamedIntColumn(const std::string& name, const std::vector<int>& data) {
+    int idx = addIntColumn(data);
+    if (idx >= 0) {
+        name_to_index_[name] = idx;
+        if (column_name_hashes_.size() < columns_.size()) column_name_hashes_.resize(columns_.size());
+        column_name_hashes_[static_cast<size_t>(idx)] = MixedRowData::hashColumnName(name.c_str());
+        updateDeviceMetadata();
+    }
+    return idx;
+}
+
+int MixedColumnProcessor::addNamedIntColumn(const std::string& name, const int* data, size_t size) {
+    if (size != num_elements_) {
+        std::cerr << "MixedColumnProcessor: Data size mismatch" << std::endl;
+        return -1;
+    }
+    std::vector<int> vec_data(data, data + size);
+    return addNamedIntColumn(name, vec_data);
+}
+
+int MixedColumnProcessor::addIntColumn(const int* data, size_t size) {
+    if (size != num_elements_) {
+        std::cerr << "MixedColumnProcessor: Data size mismatch" << std::endl;
+        return -1;
+    }
+    
+    std::vector<int> vec_data(data, data + size);
+    return addIntColumn(vec_data);
 }
 
 // 添加字符串列
@@ -652,6 +708,205 @@ void MixedProcessorBenchmark::compareBenchmarks(
                   << std::setw(15) << std::fixed << std::setprecision(2) << (result.memory_usage_bytes / (1024.0f * 1024.0f))
                   << std::endl;
     }
+}
+
+// === 分组聚合实现 ===
+
+MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupBySum(int key_column_index) {
+    return groupByAggregate(key_column_index, AggregationType::SUM);
+}
+
+MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupByAggregate(
+    int key_column_index, 
+    AggregationType agg_type
+) {
+    GroupByResult result;
+    result.num_groups = 0;
+    
+    // 验证列索引和类型
+    if (!validateColumnIndex(key_column_index)) {
+        std::cerr << "MixedColumnProcessor: Invalid key column index" << std::endl;
+        return result;
+    }
+    
+    if (column_types_[key_column_index] != ColumnDataType::INT) {
+        std::cerr << "MixedColumnProcessor: Key column must be INT type" << std::endl;
+        return result;
+    }
+    
+    // 获取key列指针
+    int* d_keys_in = static_cast<int*>(columns_[key_column_index]->getDevicePointer());
+    
+    // 确保有计算结果
+    if (!d_output_) {
+        std::cerr << "MixedColumnProcessor: No compute results available" << std::endl;
+        return result;
+    }
+    
+    // 分配临时内存用于排序后的keys和values
+    int* d_keys_out = nullptr;
+    float* d_values_out = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_keys_out, num_elements_ * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_values_out, num_elements_ * sizeof(float)));
+    
+    // 第一步：根据keys对keys和values进行排序
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    
+    // 确定临时存储大小
+    cub::DeviceRadixSort::SortPairs(
+        d_temp_storage, temp_storage_bytes,
+        d_keys_in, d_keys_out,
+        d_output_, d_values_out,
+        num_elements_,
+        0, sizeof(int) * 8,
+        stream_
+    );
+    
+    // 分配临时存储
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    
+    // 执行排序
+    cub::DeviceRadixSort::SortPairs(
+        d_temp_storage, temp_storage_bytes,
+        d_keys_in, d_keys_out,
+        d_output_, d_values_out,
+        num_elements_,
+        0, sizeof(int) * 8,
+        stream_
+    );
+    
+    // 释放排序临时存储
+    CUDA_CHECK(cudaFree(d_temp_storage));
+    d_temp_storage = nullptr;
+    
+    // 第二步：使用ReduceByKey进行分组聚合
+    int* d_unique_keys = nullptr;
+    float* d_aggregated_values = nullptr;
+    int* d_num_runs = nullptr;
+    
+    CUDA_CHECK(cudaMalloc(&d_unique_keys, num_elements_ * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_aggregated_values, num_elements_ * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_num_runs, sizeof(int)));
+    
+    // 确定ReduceByKey临时存储大小
+    temp_storage_bytes = 0;
+    
+    if (agg_type == AggregationType::SUM) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_out, d_unique_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Sum(),
+            num_elements_,
+            stream_
+        );
+    } else if (agg_type == AggregationType::MAX) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_out, d_unique_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Max(),
+            num_elements_,
+            stream_
+        );
+    } else if (agg_type == AggregationType::MIN) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_out, d_unique_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Min(),
+            num_elements_,
+            stream_
+        );
+    } else {
+        // 默认使用SUM
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_out, d_unique_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Sum(),
+            num_elements_,
+            stream_
+        );
+    }
+    
+    // 分配临时存储
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    
+    // 执行ReduceByKey
+    if (agg_type == AggregationType::SUM) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_out, d_unique_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Sum(),
+            num_elements_,
+            stream_
+        );
+    } else if (agg_type == AggregationType::MAX) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_out, d_unique_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Max(),
+            num_elements_,
+            stream_
+        );
+    } else if (agg_type == AggregationType::MIN) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_out, d_unique_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Min(),
+            num_elements_,
+            stream_
+        );
+    } else {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_out, d_unique_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Sum(),
+            num_elements_,
+            stream_
+        );
+    }
+    
+    // 同步
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    
+    // 获取分组数量
+    int num_groups_host;
+    CUDA_CHECK(cudaMemcpy(&num_groups_host, d_num_runs, sizeof(int), cudaMemcpyDeviceToHost));
+    result.num_groups = static_cast<size_t>(num_groups_host);
+    
+    // 复制结果到主机
+    result.unique_keys.resize(result.num_groups);
+    result.aggregated_values.resize(result.num_groups);
+    
+    CUDA_CHECK(cudaMemcpy(result.unique_keys.data(), d_unique_keys, 
+                         result.num_groups * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(result.aggregated_values.data(), d_aggregated_values, 
+                         result.num_groups * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // 清理临时内存
+    CUDA_CHECK(cudaFree(d_temp_storage));
+    CUDA_CHECK(cudaFree(d_keys_out));
+    CUDA_CHECK(cudaFree(d_values_out));
+    CUDA_CHECK(cudaFree(d_unique_keys));
+    CUDA_CHECK(cudaFree(d_aggregated_values));
+    CUDA_CHECK(cudaFree(d_num_runs));
+    
+    return result;
 }
 
 } // namespace zmm

@@ -41,6 +41,43 @@ std::vector<float> FloatColumn::getData() const {
     return result;
 }
 
+// IntColumn 实现
+IntColumn::IntColumn(size_t num_elements) : num_elements_(num_elements) {
+    CUDA_CHECK(cudaMalloc(&d_data_, num_elements * sizeof(int)));
+}
+
+IntColumn::~IntColumn() {
+    if (d_data_) {
+        cudaFree(d_data_);
+    }
+}
+
+void IntColumn::copyFromHost(const void* host_data, size_t num_elements) {
+    if (num_elements != num_elements_) {
+        std::cerr << "IntColumn: Element count mismatch" << std::endl;
+        return;
+    }
+    CUDA_CHECK(cudaMemcpy(d_data_, host_data, num_elements * sizeof(int), cudaMemcpyHostToDevice));
+}
+
+void IntColumn::copyToHost(void* host_data) const {
+    CUDA_CHECK(cudaMemcpy(host_data, d_data_, num_elements_ * sizeof(int), cudaMemcpyDeviceToHost));
+}
+
+void IntColumn::setData(const std::vector<int>& data) {
+    if (data.size() != num_elements_) {
+        std::cerr << "IntColumn: Data size mismatch" << std::endl;
+        return;
+    }
+    copyFromHost(data.data(), data.size());
+}
+
+std::vector<int> IntColumn::getData() const {
+    std::vector<int> result(num_elements_);
+    copyToHost(result.data());
+    return result;
+}
+
 // StringColumn 实现
 StringColumn::StringColumn(size_t num_elements, size_t estimated_total_chars) 
     : num_elements_(num_elements), pool_size_(estimated_total_chars) {

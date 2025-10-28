@@ -49,6 +49,14 @@ set_target_properties(zmm_mixed_types PROPERTIES
 add_executable(mixed_example mixed_example.cu)
 target_link_libraries(mixed_example zmm_mixed_types CUDA::cudart)
 
+# GroupBy分组求和示例程序
+add_executable(groupby_example groupby_example.cu)
+target_link_libraries(groupby_example zmm_mixed_types CUDA::cudart)
+
+# GroupBy简单测试程序
+add_executable(groupby_simple_test groupby_simple_test.cu)
+target_link_libraries(groupby_simple_test zmm_mixed_types CUDA::cudart)
+
 # 保留原有示例程序（用于性能对比）
 
 # 设置编译器特定选项
@@ -58,6 +66,14 @@ if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
     target_compile_options(mixed_example PRIVATE 
+        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+    )
+    target_compile_options(groupby_example PRIVATE 
+        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+    )
+    target_compile_options(groupby_simple_test PRIVATE 
         $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )

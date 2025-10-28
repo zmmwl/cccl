@@ -52,6 +52,12 @@ public:
     int addNamedFloatColumn(const std::string& name, const std::vector<float>& data);
     int addNamedFloatColumn(const std::string& name, const float* data, size_t size);
     
+    // 添加整数列
+    int addIntColumn(const std::vector<int>& data);
+    int addIntColumn(const int* data, size_t size);
+    int addNamedIntColumn(const std::string& name, const std::vector<int>& data);
+    int addNamedIntColumn(const std::string& name, const int* data, size_t size);
+    
     // 添加字符串列
     int addStringColumn(const std::vector<std::string>& data);
     int addNamedStringColumn(const std::string& name, const std::vector<std::string>& data);
@@ -102,6 +108,28 @@ public:
     
     // 异步获取结果
     void getResultAsync(float* output, cudaStream_t user_stream = nullptr) const;
+    
+    // === 分组聚合方法 ===
+    
+    // 根据指定列进行分组求和
+    struct GroupByResult {
+        std::vector<int> unique_keys;      // 唯一的分组键
+        std::vector<float> aggregated_values; // 聚合后的值
+        size_t num_groups;                 // 分组数量
+    };
+    
+    // 根据整数列进行分组求和
+    GroupByResult groupBySum(int key_column_index);
+    
+    // 根据整数列进行分组操作（支持多种聚合函数）
+    enum class AggregationType {
+        SUM,
+        MAX,
+        MIN,
+        AVG,
+        COUNT
+    };
+    GroupByResult groupByAggregate(int key_column_index, AggregationType agg_type);
     
     // === 流控制方法 ===
     
