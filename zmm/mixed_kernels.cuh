@@ -242,6 +242,8 @@ cudaError_t launch_mixed_compute_kernel(
 ) {
     int num_blocks, block_size;
     calculate_launch_config(num_elements, num_blocks, block_size);
+
+    printf("launch_mixed_compute_kernel: num_blocks=%d, block_size=%d\n", num_blocks, block_size);
     
     mixed_compute_kernel_with_op<<<num_blocks, block_size, 0, stream>>>(
         column_ptrs, column_types, column_name_hashes, num_columns, num_elements, output, operation
@@ -276,7 +278,7 @@ cudaError_t launch_fixed_string_processing_kernel(
 ) {
     int num_blocks, block_size;
     calculate_launch_config(num_elements, num_blocks, block_size);
-    
+
     fixed_string_processing_kernel<<<num_blocks, block_size, 0, stream>>>(
         string_columns, num_string_columns, float_columns, num_float_columns,
         num_elements, output, operation_mode
