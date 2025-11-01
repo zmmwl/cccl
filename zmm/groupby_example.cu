@@ -14,7 +14,8 @@ struct AddTwoColumnsFunctor {
     __device__ float operator()(const MixedRowData& row) const {
         float v1 = (row.num_columns > 1 && row.types[1] == ColumnDataType::FLOAT) ? row.getFloat(1) : 0.0f;
         float v2 = (row.num_columns > 2 && row.types[2] == ColumnDataType::FLOAT) ? row.getFloat(2) : 0.0f;
-        return v1 + v2;
+        // return v1 + v2;
+        return (float)((double)v1 + (double)v2);
     }
 };
 
@@ -77,8 +78,11 @@ std::map<int, float> cpuGroupBySum(const std::vector<int>& ids, const std::vecto
 void demonstrateBasicGroupBy() {
     std::cout << "\n=== 基础分组求和演示 ===" << std::endl;
     
-    const size_t num_elements = 1000;
-    const int num_groups = 10;
+    // const size_t num_elements = 1000;
+    // const int num_groups = 10;
+    
+    const size_t num_elements = 10000000;
+    const int num_groups = 1000;
     
     // 生成测试数据
     auto ids = generateGroupIds(num_elements, num_groups);
@@ -122,7 +126,7 @@ void demonstrateBasicGroupBy() {
         std::cout << "  Row " << i << ": " << std::fixed << std::setprecision(2) 
                   << raw_results[i] << " = " << values1[i] << " + " << values2[i] << std::endl;
     }
-    
+
     // 执行分组求和
     std::cout << "\n执行分组求和（按ID分组）..." << std::endl;
     auto groupby_start = std::chrono::high_resolution_clock::now();
@@ -134,39 +138,43 @@ void demonstrateBasicGroupBy() {
     std::cout << "分组数量: " << groupby_result.num_groups << std::endl;
     
     // 显示分组结果
-    std::cout << "\n分组求和结果:" << std::endl;
+    std::cout << "\n前10个分组求和结果:" << std::endl;
     std::cout << std::setw(8) << "ID" << std::setw(15) << "Sum" << std::endl;
     std::cout << std::string(23, '-') << std::endl;
-    for (size_t i = 0; i < groupby_result.num_groups; ++i) {
+    for (size_t i = 0; i < 10; ++i) {
         std::cout << std::setw(8) << groupby_result.unique_keys[i]
                   << std::setw(15) << std::fixed << std::setprecision(2) << groupby_result.aggregated_values[i]
                   << std::endl;
     }
     
     // CPU验证
-    std::cout << "\nCPU端验证..." << std::endl;
-    auto cpu_result = cpuGroupBySum(ids, raw_results);
-    
-    bool all_match = true;
-    float max_error = 0.0f;
-    for (size_t i = 0; i < groupby_result.num_groups; ++i) {
-        int key = groupby_result.unique_keys[i];
-        float gpu_sum = groupby_result.aggregated_values[i];
-        float cpu_sum = cpu_result[key];
-        float error = std::abs(gpu_sum - cpu_sum);
+    bool doCPUVerify = true;
+    if (doCPUVerify){
+        std::cout << "\nCPU端验证..." << std::endl;
+        auto cpu_result = cpuGroupBySum(ids, raw_results);
         
+        bool all_match = true;
+        float max_error = 0.0f;
+        for (size_t i = 0; i < groupby_result.num_groups; ++i) {
+            int key = groupby_result.unique_keys[i];
+            float gpu_sum = groupby_result.aggregated_values[i];
+            float cpu_sum = cpu_result[key];
+            float error = std::abs(gpu_sum - cpu_sum);
+            
         if (error > 1e-3f) {
-            all_match = false;
-            max_error = std::max(max_error, error);
-            std::cout << "  不匹配: ID=" << key << ", GPU=" << gpu_sum << ", CPU=" << cpu_sum 
-                      << ", 误差=" << error << std::endl;
+                all_match = false;
+                max_error = std::max(max_error, error);
+                std::cout << "  不匹配: ID=" << key << ", GPU=" << gpu_sum << ", CPU=" << cpu_sum 
+                        << ", 误差=" << error << std::endl;
+                break;
+            }
         }
-    }
-    
-    if (all_match) {
-        std::cout << "✓ GPU结果与CPU验证完全匹配！" << std::endl;
-    } else {
-        std::cout << "✗ 存在误差，最大误差: " << max_error << std::endl;
+        
+        if (all_match) {
+            std::cout << "✓ GPU结果与CPU验证完全匹配！" << std::endl;
+        } else {
+            std::cout << "✗ 存在误差，最大误差: " << max_error << std::endl;
+        }
     }
 }
 

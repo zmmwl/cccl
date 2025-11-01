@@ -10,8 +10,8 @@ using namespace zmm;
 struct PassThroughFunctor {
     __device__ float operator()(const MixedRowData& row) const {
         // 返回第二列（索引1）的浮点值
-        if (row.num_columns > 1 && row.types[1] == ColumnDataType::FLOAT) {
-            return row.getFloat(1);
+        if (row.num_columns > 2 && row.types[1] == ColumnDataType::FLOAT && row.types[2] == ColumnDataType::FLOAT) {
+            return row.getFloat(1)+row.getFloat(2);
         }
         return 0.0f;
     }
@@ -38,6 +38,16 @@ int main() {
         21.0f, 14.0f, 33.0f, 23.0f, 16.0f,
         34.0f, 24.0f, 17.0f, 31.0f, 26.0f
     };
+
+    
+    // Value列
+    std::vector<float> values2 = {
+        10.0f, 20.0f, 15.0f, 30.0f, 25.0f,
+        12.0f, 35.0f, 22.0f, 13.0f, 32.0f,
+        21.0f, 14.0f, 33.0f, 23.0f, 16.0f,
+        34.0f, 24.0f, 17.0f, 31.0f, 26.0f
+    };
+    
     
     std::cout << "\n原始数据:" << std::endl;
     std::cout << "ID   Value" << std::endl;
@@ -50,6 +60,7 @@ int main() {
     auto processor = createMixedProcessor(num_elements);
     int id_col = processor->addIntColumn(ids);
     processor->addFloatColumn(values);
+    processor->addFloatColumn(values2);
     
     std::cout << "\n添加列: ID列索引=" << id_col << std::endl;
     
@@ -89,7 +100,7 @@ int main() {
     std::cout << "\nCPU 验证:" << std::endl;
     std::map<int, float> cpu_sums;
     for (size_t i = 0; i < num_elements; ++i) {
-        cpu_sums[ids[i]] += values[i];
+        cpu_sums[ids[i]] += (values[i]+values2[i]);
     }
     
     std::cout << "ID   Sum (CPU)" << std::endl;
