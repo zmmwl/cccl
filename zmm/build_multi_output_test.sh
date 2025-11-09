@@ -47,7 +47,7 @@ COMPILE_CMD="nvcc \
     --expt-relaxed-constexpr \
     -std=c++17 \
     -O3 \
-    -arch=sm_75 \
+    -arch=sm_86 \
     -o ${OUTPUT_BINARY} \
     ../${SOURCE_FILE} \
     ../${MIXED_TYPES_CU} \
