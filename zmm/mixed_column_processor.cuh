@@ -23,7 +23,14 @@ private:
     void** d_column_ptrs_;              // 设备上各列数据指针数组
     ColumnDataType* d_column_types_;    // 设备上各列类型数组
     uint32_t* d_column_name_hashes_;    // 设备上列名哈希数组（可为空）
-    float* d_output_;                   // 设备上的输出数组
+    float* d_output_;                   // 设备上的输出数组（单列输出）
+    
+    // 多列输出相关
+    void** d_output_ptrs_;              // 设备上多列输出的指针数组
+    ColumnDataType* d_output_types_;    // 设备上多列输出的类型数组
+    int num_output_columns_;            // 输出列数量
+    std::vector<void*> h_output_buffers_;  // 主机端保存的输出缓冲区指针
+    std::vector<ColumnDataType> output_column_types_; // 输出列类型
     
     // CUDA流
     cudaStream_t stream_;
@@ -101,13 +108,40 @@ public:
     
     // === 结果获取方法 ===
     
-    // 同步获取结果
+    // 同步获取结果（单列）
     std::vector<float> getResult() const;
     void getResult(float* output) const;
     void getResult(std::vector<float>& output) const;
     
     // 异步获取结果
     void getResultAsync(float* output, cudaStream_t user_stream = nullptr) const;
+    
+    // === 多列输出相关方法 ===
+    
+    // 多列输出结果结构
+    struct MultiColumnResult {
+        std::vector<std::vector<float>> float_columns;
+        std::vector<std::vector<int>> int_columns;
+        std::vector<std::vector<double>> double_columns;
+        std::vector<ColumnDataType> column_types;
+        size_t num_elements;
+        int num_columns;
+    };
+    
+    // 使用多列输出的Functor执行计算
+    template<typename FunctorType>
+    bool computeWithMultiOutput(
+        FunctorType functor,
+        const std::vector<ColumnDataType>& output_types
+    );
+    
+    // 获取多列输出结果
+    MultiColumnResult getMultiColumnResult() const;
+    
+    // 获取特定输出列（按类型）
+    std::vector<float> getOutputFloatColumn(int output_column_index) const;
+    std::vector<int> getOutputIntColumn(int output_column_index) const;
+    std::vector<double> getOutputDoubleColumn(int output_column_index) const;
     
     // === 分组聚合方法 ===
     
@@ -245,6 +279,87 @@ bool MixedColumnProcessor::computeAsync(FunctorType functor) {
         return false;
     }
     
+    total_operations_++;
+    return true;
+}
+
+template<typename FunctorType>
+bool MixedColumnProcessor::computeWithMultiOutput(
+    FunctorType functor,
+    const std::vector<ColumnDataType>& output_types
+) {
+    if (columns_.empty()) {
+        std::cerr << "MixedColumnProcessor: No columns to process" << std::endl;
+        return false;
+    }
+    
+    num_output_columns_ = static_cast<int>(output_types.size());
+    output_column_types_ = output_types;
+    
+    // 清理旧的输出缓冲区
+    for (void* ptr : h_output_buffers_) {
+        if (ptr) cudaFree(ptr);
+    }
+    h_output_buffers_.clear();
+    
+    // 为每个输出列分配设备内存
+    h_output_buffers_.resize(num_output_columns_);
+    for (int i = 0; i < num_output_columns_; ++i) {
+        void* d_buffer = nullptr;
+        size_t element_size = 0;
+        
+        switch (output_types[i]) {
+            case ColumnDataType::FLOAT:
+                element_size = sizeof(float);
+                break;
+            case ColumnDataType::INT:
+                element_size = sizeof(int);
+                break;
+            case ColumnDataType::DOUBLE:
+                element_size = sizeof(double);
+                break;
+            default:
+                std::cerr << "MixedColumnProcessor: Unsupported output type" << std::endl;
+                return false;
+        }
+        
+        CUDA_CHECK(cudaMalloc(&d_buffer, num_elements_ * element_size));
+        h_output_buffers_[i] = d_buffer;
+    }
+    
+    // 分配或更新设备端的输出元数据
+    if (d_output_ptrs_) cudaFree(d_output_ptrs_);
+    if (d_output_types_) cudaFree(d_output_types_);
+    
+    CUDA_CHECK(cudaMalloc(&d_output_ptrs_, num_output_columns_ * sizeof(void*)));
+    CUDA_CHECK(cudaMalloc(&d_output_types_, num_output_columns_ * sizeof(ColumnDataType)));
+    
+    CUDA_CHECK(cudaMemcpy(d_output_ptrs_, h_output_buffers_.data(), 
+                          num_output_columns_ * sizeof(void*), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_output_types_, output_types.data(), 
+                          num_output_columns_ * sizeof(ColumnDataType), cudaMemcpyHostToDevice));
+    
+    // 启动多列输出内核
+    cudaError_t result = kernel_launcher::launch_mixed_compute_kernel_multi_output(
+        d_column_ptrs_,
+        d_column_types_,
+        d_column_name_hashes_,
+        static_cast<int>(columns_.size()),
+        num_elements_,
+        d_output_ptrs_,
+        d_output_types_,
+        num_output_columns_,
+        functor,
+        stream_
+    );
+    
+    if (result != cudaSuccess) {
+        std::cerr << "MixedColumnProcessor: Multi-output kernel launch failed: " 
+                  << cudaGetErrorString(result) << std::endl;
+        return false;
+    }
+    
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
     total_operations_++;
     return true;
 }

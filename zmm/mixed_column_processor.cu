@@ -14,6 +14,9 @@ MixedColumnProcessor::MixedColumnProcessor(size_t num_elements)
     , d_column_types_(nullptr)
     , d_column_name_hashes_(nullptr)
     , d_output_(nullptr)
+    , d_output_ptrs_(nullptr)
+    , d_output_types_(nullptr)
+    , num_output_columns_(0)
     , stream_(nullptr)
     , last_compute_time_ms_(0.0f)
     , total_operations_(0) {
@@ -31,6 +34,13 @@ MixedColumnProcessor::MixedColumnProcessor(size_t num_elements)
 // 析构函数
 MixedColumnProcessor::~MixedColumnProcessor() {
     cleanupDeviceMemory();
+    
+    // 清理多列输出缓冲区
+    for (void* ptr : h_output_buffers_) {
+        if (ptr) cudaFree(ptr);
+    }
+    if (d_output_ptrs_) cudaFree(d_output_ptrs_);
+    if (d_output_types_) cudaFree(d_output_types_);
     
     if (stream_) {
         cudaStreamDestroy(stream_);
@@ -424,7 +434,105 @@ void MixedColumnProcessor::getResult(std::vector<float>& output) const {
 void MixedColumnProcessor::getResultAsync(float* output, cudaStream_t user_stream) const {
     cudaStream_t target_stream = user_stream ? user_stream : stream_;
     CUDA_CHECK(cudaMemcpyAsync(output, d_output_, num_elements_ * sizeof(float), 
-                              cudaMemcpyDeviceToHost, target_stream));
+                               cudaMemcpyDeviceToHost, target_stream));
+}
+
+// 获取多列输出结果
+MixedColumnProcessor::MultiColumnResult MixedColumnProcessor::getMultiColumnResult() const {
+    MultiColumnResult result;
+    result.num_elements = num_elements_;
+    result.num_columns = num_output_columns_;
+    result.column_types = output_column_types_;
+    
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    
+    for (int i = 0; i < num_output_columns_; ++i) {
+        switch (output_column_types_[i]) {
+            case ColumnDataType::FLOAT: {
+                std::vector<float> column_data(num_elements_);
+                CUDA_CHECK(cudaMemcpy(column_data.data(), h_output_buffers_[i], 
+                                      num_elements_ * sizeof(float), cudaMemcpyDeviceToHost));
+                result.float_columns.push_back(std::move(column_data));
+                break;
+            }
+            case ColumnDataType::INT: {
+                std::vector<int> column_data(num_elements_);
+                CUDA_CHECK(cudaMemcpy(column_data.data(), h_output_buffers_[i], 
+                                      num_elements_ * sizeof(int), cudaMemcpyDeviceToHost));
+                result.int_columns.push_back(std::move(column_data));
+                break;
+            }
+            case ColumnDataType::DOUBLE: {
+                std::vector<double> column_data(num_elements_);
+                CUDA_CHECK(cudaMemcpy(column_data.data(), h_output_buffers_[i], 
+                                      num_elements_ * sizeof(double), cudaMemcpyDeviceToHost));
+                result.double_columns.push_back(std::move(column_data));
+                break;
+            }
+            default:
+                std::cerr << "MixedColumnProcessor: Unsupported output type in column " << i << std::endl;
+                break;
+        }
+    }
+    
+    return result;
+}
+
+// 获取特定输出列（float）
+std::vector<float> MixedColumnProcessor::getOutputFloatColumn(int output_column_index) const {
+    if (output_column_index < 0 || output_column_index >= num_output_columns_) {
+        std::cerr << "MixedColumnProcessor: Invalid output column index" << std::endl;
+        return std::vector<float>();
+    }
+    
+    if (output_column_types_[output_column_index] != ColumnDataType::FLOAT) {
+        std::cerr << "MixedColumnProcessor: Output column is not FLOAT type" << std::endl;
+        return std::vector<float>();
+    }
+    
+    std::vector<float> result(num_elements_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    CUDA_CHECK(cudaMemcpy(result.data(), h_output_buffers_[output_column_index], 
+                          num_elements_ * sizeof(float), cudaMemcpyDeviceToHost));
+    return result;
+}
+
+// 获取特定输出列（int）
+std::vector<int> MixedColumnProcessor::getOutputIntColumn(int output_column_index) const {
+    if (output_column_index < 0 || output_column_index >= num_output_columns_) {
+        std::cerr << "MixedColumnProcessor: Invalid output column index" << std::endl;
+        return std::vector<int>();
+    }
+    
+    if (output_column_types_[output_column_index] != ColumnDataType::INT) {
+        std::cerr << "MixedColumnProcessor: Output column is not INT type" << std::endl;
+        return std::vector<int>();
+    }
+    
+    std::vector<int> result(num_elements_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    CUDA_CHECK(cudaMemcpy(result.data(), h_output_buffers_[output_column_index], 
+                          num_elements_ * sizeof(int), cudaMemcpyDeviceToHost));
+    return result;
+}
+
+// 获取特定输出列（double）
+std::vector<double> MixedColumnProcessor::getOutputDoubleColumn(int output_column_index) const {
+    if (output_column_index < 0 || output_column_index >= num_output_columns_) {
+        std::cerr << "MixedColumnProcessor: Invalid output column index" << std::endl;
+        return std::vector<double>();
+    }
+    
+    if (output_column_types_[output_column_index] != ColumnDataType::DOUBLE) {
+        std::cerr << "MixedColumnProcessor: Output column is not DOUBLE type" << std::endl;
+        return std::vector<double>();
+    }
+    
+    std::vector<double> result(num_elements_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    CUDA_CHECK(cudaMemcpy(result.data(), h_output_buffers_[output_column_index], 
+                          num_elements_ * sizeof(double), cudaMemcpyDeviceToHost));
+    return result;
 }
 
 // 流同步

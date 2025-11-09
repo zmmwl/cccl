@@ -482,4 +482,191 @@ struct NamedEcommerceScoreFunctor {
     }
 };
 
+// ===== 多列输出操作示例 =====
+
+// 示例1：将价格和评分分别输出到两列（float类型）
+class PriceRatingSplitOperation : public IMultiColumnOperation {
+public:
+    int getNumOutputColumns() const override { return 2; }
+    
+    void getOutputTypes(ColumnDataType* types) const override {
+        types[0] = ColumnDataType::FLOAT;  // 价格
+        types[1] = ColumnDataType::FLOAT;  // 评分
+    }
+    
+    __device__ __host__ void execute(const MixedRowData& row, MultiColumnOutput& output) const override {
+        // 假设输入：第0列是价格，第1列是评分
+        float price = row.getFloat("price");
+        float rating = row.getFloat("rating");
+        
+        output.setFloat(0, price);
+        output.setFloat(1, rating);
+    }
+    
+    const char* getName() const override { return "PriceRatingSplitOperation"; }
+};
+
+// 示例2：计算多个统计值（总和、最大值、最小值）
+class MultiStatisticsOperation : public IMultiColumnOperation {
+public:
+    int getNumOutputColumns() const override { return 3; }
+    
+    void getOutputTypes(ColumnDataType* types) const override {
+        types[0] = ColumnDataType::FLOAT;  // 总和
+        types[1] = ColumnDataType::FLOAT;  // 最大值
+        types[2] = ColumnDataType::FLOAT;  // 最小值
+    }
+    
+    __device__ __host__ void execute(const MixedRowData& row, MultiColumnOutput& output) const override {
+        float sum = 0.0f;
+        float max_val = -1e30f;
+        float min_val = 1e30f;
+        
+        for (int i = 0; i < row.num_columns; ++i) {
+            if (row.types[i] == ColumnDataType::FLOAT) {
+                float val = row.getFloat(i);
+                sum += val;
+                max_val = (val > max_val) ? val : max_val;
+                min_val = (val < min_val) ? val : min_val;
+            }
+        }
+        
+        output.setFloat(0, sum);
+        output.setFloat(1, max_val);
+        output.setFloat(2, min_val);
+    }
+    
+    const char* getName() const override { return "MultiStatisticsOperation"; }
+};
+
+// 示例3：混合类型输出 - 计算总价(float)和数量(int)
+class PriceQuantityOperation : public IMultiColumnOperation {
+public:
+    int getNumOutputColumns() const override { return 2; }
+    
+    void getOutputTypes(ColumnDataType* types) const override {
+        types[0] = ColumnDataType::FLOAT;  // 总价
+        types[1] = ColumnDataType::INT;    // 数量
+    }
+    
+    __device__ __host__ void execute(const MixedRowData& row, MultiColumnOutput& output) const override {
+        float price = row.getFloat("price");
+        float quantity = row.getFloat("quantity");
+        
+        output.setFloat(0, price * quantity);  // 总价
+        output.setInt(1, static_cast<int>(quantity));  // 数量转为整数
+    }
+    
+    const char* getName() const override { return "PriceQuantityOperation"; }
+};
+
+// 示例4：电商评分的多维分析 - 返回多个评分维度
+class MultiDimensionScoreOperation : public IMultiColumnOperation {
+public:
+    int getNumOutputColumns() const override { return 4; }
+    
+    void getOutputTypes(ColumnDataType* types) const override {
+        types[0] = ColumnDataType::FLOAT;  // 基础评分
+        types[1] = ColumnDataType::FLOAT;  // 价格评分
+        types[2] = ColumnDataType::FLOAT;  // 品牌评分
+        types[3] = ColumnDataType::FLOAT;  // 综合评分
+    }
+    
+    __device__ __host__ void execute(const MixedRowData& row, MultiColumnOutput& output) const override {
+        float price = row.getFloat("price");
+        float rating = row.getFloat("rating");
+        GPUString category = row.getString("category");
+        GPUString brand = row.getString("brand");
+        
+        // 基础评分
+        float base_score = rating * 7.0f;
+        
+        // 价格评分
+        float price_score = (price > 0) ? (100.0f / price) * 2.0f : 0.0f;
+        
+        // 品牌评分
+        float brand_score = 0.0f;
+        if (gpu_string_equals(brand, "premium")) brand_score = 10.0f;
+        else if (gpu_string_equals(brand, "popular")) brand_score = 5.0f;
+        
+        // 类别乘数
+        float category_multiplier = 1.0f;
+        if (gpu_string_equals(category, "electronics")) category_multiplier = 1.2f;
+        else if (gpu_string_equals(category, "luxury")) category_multiplier = 1.5f;
+        
+        // 综合评分
+        float total_score = (base_score + price_score + brand_score) * category_multiplier;
+        
+        output.setFloat(0, base_score);
+        output.setFloat(1, price_score);
+        output.setFloat(2, brand_score);
+        output.setFloat(3, total_score);
+    }
+    
+    const char* getName() const override { return "MultiDimensionScoreOperation"; }
+};
+
+// ===== 多列输出的Functor版本（用于模板内核） =====
+
+// Functor: 价格和评分分离
+struct PriceRatingSplitFunctor {
+    __device__ void operator()(const MixedRowData& row, MultiColumnOutput& output) const {
+        float price = row.getFloat("price");
+        float rating = row.getFloat("rating");
+        
+        output.setFloat(0, price);
+        output.setFloat(1, rating);
+    }
+};
+
+// Functor: 多统计值
+struct MultiStatisticsFunctor {
+    __device__ void operator()(const MixedRowData& row, MultiColumnOutput& output) const {
+        float sum = 0.0f;
+        float max_val = -1e30f;
+        float min_val = 1e30f;
+        
+        for (int i = 0; i < row.num_columns; ++i) {
+            if (row.types[i] == ColumnDataType::FLOAT) {
+                float val = row.getFloat(i);
+                sum += val;
+                max_val = (val > max_val) ? val : max_val;
+                min_val = (val < min_val) ? val : min_val;
+            }
+        }
+        
+        output.setFloat(0, sum);
+        output.setFloat(1, max_val);
+        output.setFloat(2, min_val);
+    }
+};
+
+// Functor: 多维评分
+struct MultiDimensionScoreFunctor {
+    __device__ void operator()(const MixedRowData& row, MultiColumnOutput& output) const {
+        float price = row.getFloat("price");
+        float rating = row.getFloat("rating");
+        GPUString category = row.getString("category");
+        GPUString brand = row.getString("brand");
+        
+        float base_score = rating * 7.0f;
+        float price_score = (price > 0) ? (100.0f / price) * 2.0f : 0.0f;
+        
+        float brand_score = 0.0f;
+        if (gpu_string_equals(brand, "premium")) brand_score = 10.0f;
+        else if (gpu_string_equals(brand, "popular")) brand_score = 5.0f;
+        
+        float category_multiplier = 1.0f;
+        if (gpu_string_equals(category, "electronics")) category_multiplier = 1.2f;
+        else if (gpu_string_equals(category, "luxury")) category_multiplier = 1.5f;
+        
+        float total_score = (base_score + price_score + brand_score) * category_multiplier;
+        
+        output.setFloat(0, base_score);
+        output.setFloat(1, price_score);
+        output.setFloat(2, brand_score);
+        output.setFloat(3, total_score);
+    }
+};
+
 } // namespace zmm

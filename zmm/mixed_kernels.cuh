@@ -16,7 +16,7 @@ __global__ void mixed_compute_kernel(
     void* operation_params       // 操作参数（可选）
 );
 
-// 专用的混合计算内核（带操作符指针）
+// 专用的混合计算内核（带操作符指针）- 单列输出版本（向后兼容）
 template<typename OperationFunc>
 __global__ void mixed_compute_kernel_with_op(
     void** column_ptrs,           // 各列数据的设备指针数组
@@ -36,6 +36,34 @@ __global__ void mixed_compute_kernel_with_op(
         
         // 应用操作并存储结果
         output[i] = operation(row);
+    }
+}
+
+// 新的多列多类型输出内核
+template<typename OperationFunc>
+__global__ void mixed_compute_kernel_multi_output(
+    void** column_ptrs,            // 输入列数据的设备指针数组
+    ColumnDataType* column_types,  // 输入列的数据类型数组
+    uint32_t* column_name_hashes,  // 输入列名称哈希（可为null）
+    int num_columns,              // 输入列数
+    size_t num_elements,          // 元素数量
+    void** output_ptrs,           // 输出列数据的设备指针数组
+    ColumnDataType* output_types, // 输出列的数据类型数组
+    int num_output_columns,       // 输出列数
+    OperationFunc operation       // 操作函数对象
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = blockDim.x * gridDim.x;
+    
+    for (size_t i = idx; i < num_elements; i += stride) {
+        // 构造当前行的输入数据
+        MixedRowData row(column_ptrs, column_types, column_name_hashes, num_columns, i);
+        
+        // 构造输出数据结构
+        MultiColumnOutput output(output_ptrs, output_types, num_output_columns, i);
+        
+        // 应用操作并存储结果到多列
+        operation(row, output);
     }
 }
 
@@ -228,7 +256,7 @@ inline void calculate_launch_config(size_t num_elements, int& num_blocks, int& b
     num_blocks = std::min(65535, static_cast<int>((num_elements + block_size - 1) / block_size));
 }
 
-// 启动混合计算内核
+// 启动混合计算内核（单列输出，向后兼容）
 template<typename OperationFunc>
 cudaError_t launch_mixed_compute_kernel(
     void** column_ptrs,
@@ -247,6 +275,34 @@ cudaError_t launch_mixed_compute_kernel(
     
     mixed_compute_kernel_with_op<<<num_blocks, block_size, 0, stream>>>(
         column_ptrs, column_types, column_name_hashes, num_columns, num_elements, output, operation
+    );
+    
+    return cudaGetLastError();
+}
+
+// 启动多列多类型输出内核
+template<typename OperationFunc>
+cudaError_t launch_mixed_compute_kernel_multi_output(
+    void** column_ptrs,
+    ColumnDataType* column_types,
+    uint32_t* column_name_hashes,
+    int num_columns,
+    size_t num_elements,
+    void** output_ptrs,
+    ColumnDataType* output_types,
+    int num_output_columns,
+    OperationFunc operation,
+    cudaStream_t stream = 0
+) {
+    int num_blocks, block_size;
+    calculate_launch_config(num_elements, num_blocks, block_size);
+
+    printf("launch_mixed_compute_kernel_multi_output: num_blocks=%d, block_size=%d, num_output_columns=%d\n", 
+           num_blocks, block_size, num_output_columns);
+    
+    mixed_compute_kernel_multi_output<<<num_blocks, block_size, 0, stream>>>(
+        column_ptrs, column_types, column_name_hashes, num_columns, num_elements,
+        output_ptrs, output_types, num_output_columns, operation
     );
     
     return cudaGetLastError();

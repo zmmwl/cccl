@@ -253,11 +253,66 @@ struct MixedRowData {
     }
 };
 
-// 混合操作接口
+// 多列输出数据结构
+struct MultiColumnOutput {
+    void** output_ptrs;             // 输出列的指针数组
+    ColumnDataType* output_types;   // 输出列的类型数组
+    int num_output_columns;        // 输出列数量
+    size_t row_index;              // 当前行索引
+    
+    __device__ __host__ MultiColumnOutput() 
+        : output_ptrs(nullptr), output_types(nullptr), num_output_columns(0), row_index(0) {}
+    
+    __device__ __host__ MultiColumnOutput(void** ptrs, ColumnDataType* types, int n, size_t idx)
+        : output_ptrs(ptrs), output_types(types), num_output_columns(n), row_index(idx) {}
+    
+    // 设置指定列的浮点值
+    __device__ __host__ void setFloat(int column_index, float value) {
+        if (column_index >= num_output_columns || output_types[column_index] != ColumnDataType::FLOAT) {
+            return;
+        }
+        ((float*)output_ptrs[column_index])[row_index] = value;
+    }
+    
+    // 设置指定列的整数值
+    __device__ __host__ void setInt(int column_index, int value) {
+        if (column_index >= num_output_columns || output_types[column_index] != ColumnDataType::INT) {
+            return;
+        }
+        ((int*)output_ptrs[column_index])[row_index] = value;
+    }
+    
+    // 设置指定列的双精度值
+    __device__ __host__ void setDouble(int column_index, double value) {
+        if (column_index >= num_output_columns || output_types[column_index] != ColumnDataType::DOUBLE) {
+            return;
+        }
+        ((double*)output_ptrs[column_index])[row_index] = value;
+    }
+};
+
+// 混合操作接口（保留原有的单列float返回接口用于向后兼容）
 class IMixedOperation {
 public:
     virtual ~IMixedOperation() = default;
     virtual __device__ __host__ float execute(const MixedRowData& row) const = 0;
+    virtual const char* getName() const = 0;
+};
+
+// 新的多列输出操作接口
+class IMultiColumnOperation {
+public:
+    virtual ~IMultiColumnOperation() = default;
+    
+    // 返回输出列数量
+    virtual int getNumOutputColumns() const = 0;
+    
+    // 返回输出列类型
+    virtual void getOutputTypes(ColumnDataType* types) const = 0;
+    
+    // 执行操作并写入多列输出
+    virtual __device__ __host__ void execute(const MixedRowData& row, MultiColumnOutput& output) const = 0;
+    
     virtual const char* getName() const = 0;
 };
 
