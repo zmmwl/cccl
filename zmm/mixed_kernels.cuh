@@ -219,6 +219,62 @@ __global__ void mixed_type_conversion_kernel(
     size_t num_elements
 );
 
+// 多输出混合计算内核（支持多个operator）
+template<typename... OperationFuncs>
+__global__ void mixed_compute_kernel_multi_op(
+    void** column_ptrs,
+    ColumnDataType* column_types,
+    uint32_t* column_name_hashes,
+    int num_columns,
+    size_t num_elements,
+    float** outputs,  // 多个输出数组
+    int num_outputs,
+    OperationFuncs... operations
+);
+
+// 辅助函数用于执行多个operations
+template<int OpIdx, typename... Ops>
+struct MultiOpExecutor;
+
+// 递归情况：至少有一个operator
+template<int OpIdx, typename FirstOp, typename... RestOps>
+struct MultiOpExecutor<OpIdx, FirstOp, RestOps...> {
+    __device__ static void execute(const MixedRowData& row, float** outputs, size_t i, 
+                                    FirstOp first, RestOps... rest) {
+        outputs[OpIdx][i] = first(row);
+        MultiOpExecutor<OpIdx + 1, RestOps...>::execute(row, outputs, i, rest...);
+    }
+};
+
+// 递归终止：没有更多operators
+template<int OpIdx>
+struct MultiOpExecutor<OpIdx> {
+    __device__ static void execute(const MixedRowData& row, float** outputs, size_t i) {
+        // 终止递归
+    }
+};
+
+// 多operator内核实现
+template<typename... OperationFuncs>
+__global__ void mixed_compute_kernel_multi_op(
+    void** column_ptrs,
+    ColumnDataType* column_types,
+    uint32_t* column_name_hashes,
+    int num_columns,
+    size_t num_elements,
+    float** outputs,
+    int num_outputs,
+    OperationFuncs... operations
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = blockDim.x * gridDim.x;
+    
+    for (size_t i = idx; i < num_elements; i += stride) {
+        MixedRowData row(column_ptrs, column_types, column_name_hashes, num_columns, i);
+        MultiOpExecutor<0, OperationFuncs...>::execute(row, outputs, i, operations...);
+    }
+}
+
 // 内核启动辅助函数
 namespace kernel_launcher {
 
@@ -247,6 +303,33 @@ cudaError_t launch_mixed_compute_kernel(
     
     mixed_compute_kernel_with_op<<<num_blocks, block_size, 0, stream>>>(
         column_ptrs, column_types, column_name_hashes, num_columns, num_elements, output, operation
+    );
+    
+    return cudaGetLastError();
+}
+
+// 启动多operator混合计算内核
+template<typename... OperationFuncs>
+cudaError_t launch_mixed_compute_kernel_multi(
+    void** column_ptrs,
+    ColumnDataType* column_types,
+    uint32_t* column_name_hashes,
+    int num_columns,
+    size_t num_elements,
+    float** outputs,
+    int num_outputs,
+    cudaStream_t stream,
+    OperationFuncs... operations
+) {
+    int num_blocks, block_size;
+    calculate_launch_config(num_elements, num_blocks, block_size);
+
+    printf("launch_mixed_compute_kernel_multi: num_blocks=%d, block_size=%d, num_outputs=%d\n", 
+           num_blocks, block_size, num_outputs);
+    
+    mixed_compute_kernel_multi_op<<<num_blocks, block_size, 0, stream>>>(
+        column_ptrs, column_types, column_name_hashes, num_columns, num_elements, 
+        outputs, num_outputs, operations...
     );
     
     return cudaGetLastError();

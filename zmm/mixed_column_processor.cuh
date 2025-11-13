@@ -23,7 +23,9 @@ private:
     void** d_column_ptrs_;              // 设备上各列数据指针数组
     ColumnDataType* d_column_types_;    // 设备上各列类型数组
     uint32_t* d_column_name_hashes_;    // 设备上列名哈希数组（可为空）
-    float* d_output_;                   // 设备上的输出数组
+    float* d_output_;                   // 设备上的输出数组（用于单operator）
+    std::vector<float*> d_outputs_;     // 设备上的多输出数组（用于多operator）
+    size_t num_outputs_;                // 输出列数
     
     // CUDA流
     cudaStream_t stream_;
@@ -88,9 +90,13 @@ public:
     // 使用自定义操作对象执行计算
     bool compute(const IMixedOperation& operation);
     
-    // 使用函数对象执行计算
+    // 使用函数对象执行计算（单operator）
     template<typename FunctorType>
     bool computeWithFunctor(FunctorType functor);
+    
+    // 使用多个函数对象执行计算（多operator）
+    template<typename... FunctorTypes>
+    bool computeWithFunctors(FunctorTypes... functors);
     
     // 使用操作ID执行计算（条件分支方式）
     bool computeConditional(int operation_id);
@@ -101,10 +107,14 @@ public:
     
     // === 结果获取方法 ===
     
-    // 同步获取结果
+    // 同步获取结果（单列）
     std::vector<float> getResult() const;
     void getResult(float* output) const;
     void getResult(std::vector<float>& output) const;
+    
+    // 同步获取结果（多列）
+    std::vector<std::vector<float>> getResults() const;
+    void getResults(std::vector<float*> outputs) const;
     
     // 异步获取结果
     void getResultAsync(float* output, cudaStream_t user_stream = nullptr) const;
@@ -113,15 +123,14 @@ public:
     
     // 根据指定列进行分组求和
     struct GroupByResult {
-        std::vector<int> unique_keys;      // 唯一的分组键
+        std::vector<int> unique_keys;      // 唯一的分组键（单键）
+        std::vector<std::vector<int>> unique_multi_keys; // 唯一的分组键（多键）
         std::vector<float> aggregated_values; // 聚合后的值
         size_t num_groups;                 // 分组数量
+        bool is_multi_key;                 // 是否为多键分组
     };
     
-    // 根据整数列进行分组求和
-    GroupByResult groupBySum(int key_column_index);
-    
-    // 根据整数列进行分组操作（支持多种聚合函数）
+    // 聚合类型枚举
     enum class AggregationType {
         SUM,
         MAX,
@@ -129,7 +138,36 @@ public:
         AVG,
         COUNT
     };
-    GroupByResult groupByAggregate(int key_column_index, AggregationType agg_type);
+    
+    // 数据源类型：从输入列或从operator结果列
+    enum class DataSource {
+        INPUT_COLUMN,      // 从输入列中选择
+        OPERATOR_RESULT    // 从operator结果中选择
+    };
+    
+    // 根据整数列进行分组求和（单键，默认聚合d_output_）
+    GroupByResult groupBySum(int key_column_index);
+    
+    // 根据整数列进行分组操作（单键，指定聚合字段）
+    // value_column_index: 待聚合字段的索引
+    // value_source: 聚合字段来源（INPUT_COLUMN 或 OPERATOR_RESULT）
+    GroupByResult groupByAggregate(
+        int key_column_index, 
+        AggregationType agg_type,
+        int value_column_index = -1,  // -1表示使用d_output_
+        DataSource value_source = DataSource::OPERATOR_RESULT
+    );
+    
+    // 根据多个整数列进行分组操作（多键，指定聚合字段）
+    // key_column_indices: 多个键列的索引
+    // value_column_index: 待聚合字段的索引
+    // value_source: 聚合字段来源
+    GroupByResult groupByAggregateMultiKey(
+        const std::vector<int>& key_column_indices,
+        AggregationType agg_type,
+        int value_column_index = -1,  // -1表示使用d_output_
+        DataSource value_source = DataSource::OPERATOR_RESULT
+    );
     
     // === 流控制方法 ===
     
@@ -245,6 +283,59 @@ bool MixedColumnProcessor::computeAsync(FunctorType functor) {
         return false;
     }
     
+    total_operations_++;
+    return true;
+}
+
+template<typename... FunctorTypes>
+bool MixedColumnProcessor::computeWithFunctors(FunctorTypes... functors) {
+    if (columns_.empty()) {
+        std::cerr << "MixedColumnProcessor: No columns to process" << std::endl;
+        return false;
+    }
+    
+    // 获取operator数量
+    constexpr size_t num_functors = sizeof...(FunctorTypes);
+    num_outputs_ = num_functors;
+    
+    // 分配多个输出缓冲区
+    d_outputs_.resize(num_outputs_);
+    for (size_t i = 0; i < num_outputs_; ++i) {
+        if (d_outputs_[i] == nullptr) {
+            CUDA_CHECK(cudaMalloc(&d_outputs_[i], num_elements_ * sizeof(float)));
+        }
+    }
+    
+    // 创建设备端输出指针数组
+    float** d_output_ptrs = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_output_ptrs, num_outputs_ * sizeof(float*)));
+    CUDA_CHECK(cudaMemcpy(d_output_ptrs, d_outputs_.data(), 
+                         num_outputs_ * sizeof(float*), cudaMemcpyHostToDevice));
+    
+    // 启动多operator内核
+    cudaError_t result = kernel_launcher::launch_mixed_compute_kernel_multi(
+        d_column_ptrs_,
+        d_column_types_,
+        d_column_name_hashes_,
+        static_cast<int>(columns_.size()),
+        num_elements_,
+        d_output_ptrs,
+        static_cast<int>(num_outputs_),
+        stream_,
+        functors...
+    );
+    
+    // 清理临时内存
+    CUDA_CHECK(cudaFree(d_output_ptrs));
+    
+    if (result != cudaSuccess) {
+        std::cerr << "MixedColumnProcessor: Multi-operator kernel launch failed: " 
+                  << cudaGetErrorString(result) << std::endl;
+        return false;
+    }
+    
+    // 记录性能（简化版本）
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
     total_operations_++;
     return true;
 }

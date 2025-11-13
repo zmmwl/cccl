@@ -41,6 +41,40 @@ struct SalesAmountFunctor {
     }
 };
 
+// 多operator演示用的全局functors
+struct SumOperator {
+    __device__ float operator()(const MixedRowData& row) const {
+        float v1 = (row.num_columns > 1 && row.types[1] == ColumnDataType::FLOAT) ? row.getFloat(1) : 0.0f;
+        float v2 = (row.num_columns > 2 && row.types[2] == ColumnDataType::FLOAT) ? row.getFloat(2) : 0.0f;
+        return v1 + v2;
+    }
+};
+
+struct ProductOperator {
+    __device__ float operator()(const MixedRowData& row) const {
+        float v1 = (row.num_columns > 1 && row.types[1] == ColumnDataType::FLOAT) ? row.getFloat(1) : 0.0f;
+        float v2 = (row.num_columns > 2 && row.types[2] == ColumnDataType::FLOAT) ? row.getFloat(2) : 0.0f;
+        return v1 * v2;  // price * quantity = total
+    }
+};
+
+struct AvgOperator {
+    __device__ float operator()(const MixedRowData& row) const {
+        float v1 = (row.num_columns > 1 && row.types[1] == ColumnDataType::FLOAT) ? row.getFloat(1) : 0.0f;
+        float v2 = (row.num_columns > 2 && row.types[2] == ColumnDataType::FLOAT) ? row.getFloat(2) : 0.0f;
+        return (v1 + v2) / 2.0f;
+    }
+};
+
+// 收入计算functor
+struct RevenueOperator {
+    __device__ float operator()(const MixedRowData& row) const {
+        float price = (row.num_columns > 1 && row.types[1] == ColumnDataType::FLOAT) ? row.getFloat(1) : 0.0f;
+        float sales = (row.num_columns > 2 && row.types[2] == ColumnDataType::FLOAT) ? row.getFloat(2) : 0.0f;
+        return price * sales;
+    }
+};
+
 // 生成随机测试数据
 std::vector<int> generateGroupIds(size_t size, int num_groups) {
     std::vector<int> ids(size);
@@ -333,6 +367,287 @@ void demonstrateBusinessScenario() {
     std::cout << "平均每商品销售额: " << (total_sales / sales_by_product.num_groups) << std::endl;
 }
 
+// 演示多operator功能
+void demonstrateMultiOperators() {
+    std::cout << "\n=== 多Operator演示 ===" << std::endl;
+    
+    const size_t num_elements = 1000;
+    const int num_groups = 5;
+    
+    auto ids = generateGroupIds(num_elements, num_groups);
+    auto prices = generateValues(num_elements, 10.0f, 100.0f);
+    auto quantities = generateValues(num_elements, 1.0f, 10.0f);
+    
+    auto processor = createMixedProcessor(num_elements);
+    int id_col = processor->addIntColumn(ids);
+    processor->addFloatColumn(prices);
+    processor->addFloatColumn(quantities);
+    
+    std::cout << "数据: " << num_elements << " 行, " << num_groups << " 个分组" << std::endl;
+    
+    // 执行多operator计算（使用全局定义的operators）
+    std::cout << "\n执行3个operators: Sum, Product, Average..." << std::endl;
+    processor->computeWithFunctors(SumOperator{}, ProductOperator{}, AvgOperator{});
+    
+    // 获取多列结果
+    auto results = processor->getResults();
+    std::cout << "生成了 " << results.size() << " 列结果" << std::endl;
+    
+    // 显示前5行的结果
+    std::cout << "\n前5行的多operator结果:" << std::endl;
+    std::cout << std::setw(8) << "Row" << std::setw(12) << "Sum" << std::setw(12) << "Product" 
+              << std::setw(12) << "Average" << std::endl;
+    std::cout << std::string(44, '-') << std::endl;
+    for (int i = 0; i < 5; ++i) {
+        std::cout << std::setw(8) << i;
+        for (size_t j = 0; j < results.size(); ++j) {
+            std::cout << std::setw(12) << std::fixed << std::setprecision(2) << results[j][i];
+        }
+        std::cout << std::endl;
+    }
+    
+    // 对每个结果列进行分组求和
+    std::cout << "\n对Product结果（列1）按ID分组求和..." << std::endl;
+    auto groupby_result = processor->groupByAggregate(
+        id_col, 
+        MixedColumnProcessor::AggregationType::SUM,
+        1,  // 使用第1个operator结果（Product）
+        MixedColumnProcessor::DataSource::OPERATOR_RESULT
+    );
+    
+    std::cout << "分组数量: " << groupby_result.num_groups << std::endl;
+    std::cout << "\n前5个分组的Product总和:" << std::endl;
+    std::cout << std::setw(8) << "ID" << std::setw(18) << "Total Product" << std::endl;
+    std::cout << std::string(26, '-') << std::endl;
+    for (size_t i = 0; i < std::min(size_t(5), groupby_result.num_groups); ++i) {
+        std::cout << std::setw(8) << groupby_result.unique_keys[i]
+                  << std::setw(18) << std::fixed << std::setprecision(2) 
+                  << groupby_result.aggregated_values[i] << std::endl;
+    }
+}
+
+// 演示指定聚合字段功能
+void demonstrateSpecificAggregation() {
+    std::cout << "\n=== 指定聚合字段演示 ===" << std::endl;
+    
+    const size_t num_elements = 800;
+    const int num_groups = 4;
+    
+    auto category_ids = generateGroupIds(num_elements, num_groups);
+    auto prices = generateValues(num_elements, 50.0f, 200.0f);
+    auto sales_counts = generateValues(num_elements, 1.0f, 20.0f);
+    auto ratings = generateValues(num_elements, 1.0f, 5.0f);
+    
+    auto processor = createMixedProcessor(num_elements);
+    int category_col = processor->addIntColumn(category_ids);
+    int price_col = processor->addFloatColumn(prices);
+    int sales_col = processor->addFloatColumn(sales_counts);
+    int rating_col = processor->addFloatColumn(ratings);
+    
+    std::cout << "数据: " << num_elements << " 行, " << num_groups << " 个分类" << std::endl;
+    std::cout << "列: category_id, price, sales_count, rating" << std::endl;
+    
+    // 测试1: 从输入列聚合（聚合price列）
+    std::cout << "\n测试1: 按category聚合price列（从输入列）..." << std::endl;
+    auto result1 = processor->groupByAggregate(
+        category_col,
+        MixedColumnProcessor::AggregationType::SUM,
+        price_col,
+        MixedColumnProcessor::DataSource::INPUT_COLUMN
+    );
+    
+    std::cout << "各分类的price总和:" << std::endl;
+    std::cout << std::setw(12) << "Category" << std::setw(18) << "Total Price" << std::endl;
+    std::cout << std::string(30, '-') << std::endl;
+    for (size_t i = 0; i < result1.num_groups; ++i) {
+        std::cout << std::setw(12) << result1.unique_keys[i]
+                  << std::setw(18) << std::fixed << std::setprecision(2) 
+                  << result1.aggregated_values[i] << std::endl;
+    }
+    
+    // 测试2: 从输入列聚合（聚合rating列，使用MAX）
+    std::cout << "\n测试2: 按category找最大rating（从输入列）..." << std::endl;
+    auto result2 = processor->groupByAggregate(
+        category_col,
+        MixedColumnProcessor::AggregationType::MAX,
+        rating_col,
+        MixedColumnProcessor::DataSource::INPUT_COLUMN
+    );
+    
+    std::cout << "各分类的最大rating:" << std::endl;
+    std::cout << std::setw(12) << "Category" << std::setw(15) << "Max Rating" << std::endl;
+    std::cout << std::string(27, '-') << std::endl;
+    for (size_t i = 0; i < result2.num_groups; ++i) {
+        std::cout << std::setw(12) << result2.unique_keys[i]
+                  << std::setw(15) << std::fixed << std::setprecision(2) 
+                  << result2.aggregated_values[i] << std::endl;
+    }
+    
+    // 测试3: 先计算operator结果，然后从operator结果聚合
+    std::cout << "\n测试3: 计算price*sales_count，然后按category聚合..." << std::endl;
+    
+    // 使用全局定义的RevenueOperator
+    processor->computeWithFunctor(RevenueOperator{});
+    
+    auto result3 = processor->groupByAggregate(
+        category_col,
+        MixedColumnProcessor::AggregationType::SUM,
+        -1,  // 使用默认的d_output_
+        MixedColumnProcessor::DataSource::OPERATOR_RESULT
+    );
+    
+    std::cout << "各分类的总收入 (price * sales_count):" << std::endl;
+    std::cout << std::setw(12) << "Category" << std::setw(20) << "Total Revenue" << std::endl;
+    std::cout << std::string(32, '-') << std::endl;
+    for (size_t i = 0; i < result3.num_groups; ++i) {
+        std::cout << std::setw(12) << result3.unique_keys[i]
+                  << std::setw(20) << std::fixed << std::setprecision(2) 
+                  << result3.aggregated_values[i] << std::endl;
+    }
+}
+
+// 演示多键分组功能
+void demonstrateMultiKeyGroupBy() {
+    std::cout << "\n=== 多键分组演示 ===" << std::endl;
+    
+    const size_t num_elements = 1000;
+    const int num_categories = 3;
+    const int num_regions = 4;
+    
+    auto category_ids = generateGroupIds(num_elements, num_categories);
+    auto region_ids = generateGroupIds(num_elements, num_regions);
+    auto sales = generateValues(num_elements, 100.0f, 1000.0f);
+    
+    auto processor = createMixedProcessor(num_elements);
+    int category_col = processor->addIntColumn(category_ids);
+    int region_col = processor->addIntColumn(region_ids);
+    int sales_col = processor->addFloatColumn(sales);
+    
+    std::cout << "数据: " << num_elements << " 行" << std::endl;
+    std::cout << "分组键: category (" << num_categories << " 个) x region (" 
+              << num_regions << " 个)" << std::endl;
+    std::cout << "理论分组数: " << (num_categories * num_regions) << std::endl;
+    
+    // 显示前10行原始数据
+    std::cout << "\n前10行原始数据:" << std::endl;
+    std::cout << std::setw(10) << "Category" << std::setw(10) << "Region" 
+              << std::setw(12) << "Sales" << std::endl;
+    std::cout << std::string(32, '-') << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << std::setw(10) << category_ids[i] 
+                  << std::setw(10) << region_ids[i]
+                  << std::setw(12) << std::fixed << std::setprecision(2) << sales[i]
+                  << std::endl;
+    }
+    
+    // 按多键分组（category, region）聚合sales
+    std::cout << "\n按 (category, region) 多键分组求和sales..." << std::endl;
+    std::vector<int> key_columns = {category_col, region_col};
+    auto result = processor->groupByAggregateMultiKey(
+        key_columns,
+        MixedColumnProcessor::AggregationType::SUM,
+        sales_col,
+        MixedColumnProcessor::DataSource::INPUT_COLUMN
+    );
+    
+    std::cout << "实际分组数: " << result.num_groups << std::endl;
+    std::cout << "是否多键分组: " << (result.is_multi_key ? "是" : "否") << std::endl;
+    
+    // 显示所有分组结果
+    std::cout << "\n所有分组的sales总和:" << std::endl;
+    std::cout << std::setw(12) << "Category" << std::setw(10) << "Region" 
+              << std::setw(18) << "Total Sales" << std::endl;
+    std::cout << std::string(40, '-') << std::endl;
+    
+    for (size_t i = 0; i < result.num_groups; ++i) {
+        const auto& keys = result.unique_multi_keys[i];
+        std::cout << std::setw(12) << keys[0]  // category
+                  << std::setw(10) << keys[1]  // region
+                  << std::setw(18) << std::fixed << std::setprecision(2) 
+                  << result.aggregated_values[i] << std::endl;
+    }
+    
+    // 找出销售额最高的category-region组合
+    size_t max_idx = 0;
+    float max_sales = result.aggregated_values[0];
+    for (size_t i = 1; i < result.num_groups; ++i) {
+        if (result.aggregated_values[i] > max_sales) {
+            max_sales = result.aggregated_values[i];
+            max_idx = i;
+        }
+    }
+    
+    std::cout << "\n销售额最高的组合:" << std::endl;
+    std::cout << "  Category: " << result.unique_multi_keys[max_idx][0] << std::endl;
+    std::cout << "  Region: " << result.unique_multi_keys[max_idx][1] << std::endl;
+    std::cout << "  Total Sales: " << std::fixed << std::setprecision(2) << max_sales << std::endl;
+}
+
+// 综合演示：三键分组
+void demonstrateThreeKeyGroupBy() {
+    std::cout << "\n=== 三键分组演示 ===" << std::endl;
+    
+    const size_t num_elements = 2000;
+    const int num_products = 3;
+    const int num_stores = 4;
+    const int num_months = 3;
+    
+    auto product_ids = generateGroupIds(num_elements, num_products);
+    auto store_ids = generateGroupIds(num_elements, num_stores);
+    auto month_ids = generateGroupIds(num_elements, num_months);
+    auto revenues = generateValues(num_elements, 500.0f, 5000.0f);
+    
+    auto processor = createMixedProcessor(num_elements);
+    int product_col = processor->addIntColumn(product_ids);
+    int store_col = processor->addIntColumn(store_ids);
+    int month_col = processor->addIntColumn(month_ids);
+    int revenue_col = processor->addFloatColumn(revenues);
+    
+    std::cout << "数据: " << num_elements << " 笔交易" << std::endl;
+    std::cout << "维度: " << num_products << " 个产品 x " << num_stores 
+              << " 个门店 x " << num_months << " 个月份" << std::endl;
+    std::cout << "理论分组数: " << (num_products * num_stores * num_months) << std::endl;
+    
+    // 三键分组
+    std::cout << "\n按 (product, store, month) 三键分组求和revenue..." << std::endl;
+    std::vector<int> key_columns = {product_col, store_col, month_col};
+    auto result = processor->groupByAggregateMultiKey(
+        key_columns,
+        MixedColumnProcessor::AggregationType::SUM,
+        revenue_col,
+        MixedColumnProcessor::DataSource::INPUT_COLUMN
+    );
+    
+    std::cout << "实际分组数: " << result.num_groups << std::endl;
+    
+    // 显示前15个分组结果
+    std::cout << "\n前15个分组的revenue总和:" << std::endl;
+    std::cout << std::setw(10) << "Product" << std::setw(8) << "Store" 
+              << std::setw(8) << "Month" << std::setw(18) << "Total Revenue" << std::endl;
+    std::cout << std::string(44, '-') << std::endl;
+    
+    for (size_t i = 0; i < std::min(size_t(15), result.num_groups); ++i) {
+        const auto& keys = result.unique_multi_keys[i];
+        std::cout << std::setw(10) << keys[0]  // product
+                  << std::setw(8) << keys[1]  // store
+                  << std::setw(8) << keys[2]  // month
+                  << std::setw(18) << std::fixed << std::setprecision(2) 
+                  << result.aggregated_values[i] << std::endl;
+    }
+    
+    // 找出表现最好的组合
+    size_t max_idx = std::distance(result.aggregated_values.begin(),
+                                    std::max_element(result.aggregated_values.begin(), 
+                                                    result.aggregated_values.end()));
+    
+    std::cout << "\n业绩最好的组合:" << std::endl;
+    std::cout << "  Product ID: " << result.unique_multi_keys[max_idx][0] << std::endl;
+    std::cout << "  Store ID: " << result.unique_multi_keys[max_idx][1] << std::endl;
+    std::cout << "  Month: " << result.unique_multi_keys[max_idx][2] << std::endl;
+    std::cout << "  Total Revenue: " << std::fixed << std::setprecision(2) 
+              << result.aggregated_values[max_idx] << std::endl;
+}
+
 int main() {
     std::cout << "ZMM 混合类型框架 - GroupBy 分组求和功能演示" << std::endl;
     std::cout << "================================================" << std::endl;
@@ -351,11 +666,21 @@ int main() {
     std::cout << "全局内存: " << prop.totalGlobalMem / (1024*1024*1024) << " GB\n" << std::endl;
     
     try {
-        // 运行演示
+        // 运行原有演示
         demonstrateBasicGroupBy();
         demonstrateAggregationTypes();
         demonstrateBusinessScenario();
         demonstrateLargeDataset();
+        
+        // 运行新功能演示
+        std::cout << "\n\n" << std::string(60, '=') << std::endl;
+        std::cout << "新功能演示" << std::endl;
+        std::cout << std::string(60, '=') << std::endl;
+        
+        demonstrateMultiOperators();
+        demonstrateSpecificAggregation();
+        demonstrateMultiKeyGroupBy();
+        demonstrateThreeKeyGroupBy();
         
         std::cout << "\n=== 所有演示完成 ===" << std::endl;
         std::cout << "GroupBy分组求和功能测试成功！" << std::endl;

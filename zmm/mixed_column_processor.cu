@@ -1,5 +1,8 @@
 #include "mixed_column_processor.cuh"
 #include <cub/cub.cuh>
+#include <thrust/device_ptr.h>
+#include <thrust/transform.h>
+#include <thrust/functional.h>
 #include <chrono>
 #include <algorithm>
 #include <iomanip>
@@ -14,6 +17,7 @@ MixedColumnProcessor::MixedColumnProcessor(size_t num_elements)
     , d_column_types_(nullptr)
     , d_column_name_hashes_(nullptr)
     , d_output_(nullptr)
+    , num_outputs_(0)
     , stream_(nullptr)
     , last_compute_time_ms_(0.0f)
     , total_operations_(0) {
@@ -427,6 +431,32 @@ void MixedColumnProcessor::getResultAsync(float* output, cudaStream_t user_strea
                               cudaMemcpyDeviceToHost, target_stream));
 }
 
+// 同步获取多列结果
+std::vector<std::vector<float>> MixedColumnProcessor::getResults() const {
+    std::vector<std::vector<float>> results;
+    results.reserve(num_outputs_);
+    
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    
+    for (size_t i = 0; i < num_outputs_; ++i) {
+        std::vector<float> result(num_elements_);
+        CUDA_CHECK(cudaMemcpy(result.data(), d_outputs_[i], 
+                             num_elements_ * sizeof(float), cudaMemcpyDeviceToHost));
+        results.push_back(std::move(result));
+    }
+    
+    return results;
+}
+
+void MixedColumnProcessor::getResults(std::vector<float*> outputs) const {
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    
+    for (size_t i = 0; i < num_outputs_ && i < outputs.size(); ++i) {
+        CUDA_CHECK(cudaMemcpy(outputs[i], d_outputs_[i], 
+                             num_elements_ * sizeof(float), cudaMemcpyDeviceToHost));
+    }
+}
+
 // 流同步
 void MixedColumnProcessor::synchronize() const {
     CUDA_CHECK(cudaStreamSynchronize(stream_));
@@ -579,6 +609,17 @@ void MixedColumnProcessor::cleanupDeviceMemory() {
         cudaFree(d_output_);
         d_output_ = nullptr;
     }
+    
+    // 清理多输出缓冲区
+    for (auto& d_out : d_outputs_) {
+        if (d_out) {
+            cudaFree(d_out);
+            d_out = nullptr;
+        }
+    }
+    d_outputs_.clear();
+    num_outputs_ = 0;
+    
     if (d_column_name_hashes_) {
         cudaFree(d_column_name_hashes_);
         d_column_name_hashes_ = nullptr;
@@ -718,10 +759,13 @@ MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupBySum(int key_col
 
 MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupByAggregate(
     int key_column_index, 
-    AggregationType agg_type
+    AggregationType agg_type,
+    int value_column_index,
+    DataSource value_source
 ) {
     GroupByResult result;
     result.num_groups = 0;
+    result.is_multi_key = false;
     
     // 验证列索引和类型
     if (!validateColumnIndex(key_column_index)) {
@@ -737,10 +781,57 @@ MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupByAggregate(
     // 获取key列指针
     int* d_keys_in = static_cast<int*>(columns_[key_column_index]->getDevicePointer());
     
-    // 确保有计算结果
-    if (!d_output_) {
-        std::cerr << "MixedColumnProcessor: No compute results available" << std::endl;
-        return result;
+    // 确定待聚合的值数据源
+    float* d_values_in = nullptr;
+    
+    if (value_column_index == -1) {
+        // 使用默认的d_output_
+        if (!d_output_) {
+            std::cerr << "MixedColumnProcessor: No compute results available" << std::endl;
+            return result;
+        }
+        d_values_in = d_output_;
+    } else {
+        // 使用指定的列
+        if (value_source == DataSource::INPUT_COLUMN) {
+            // 从输入列中选择
+            if (!validateColumnIndex(value_column_index)) {
+                std::cerr << "MixedColumnProcessor: Invalid value column index" << std::endl;
+                return result;
+            }
+            
+            // 检查列类型是否为FLOAT或INT
+            if (column_types_[value_column_index] == ColumnDataType::FLOAT) {
+                d_values_in = static_cast<float*>(columns_[value_column_index]->getDevicePointer());
+            } else if (column_types_[value_column_index] == ColumnDataType::INT) {
+                // 需要将INT转换为FLOAT
+                int* d_int_values = static_cast<int*>(columns_[value_column_index]->getDevicePointer());
+                CUDA_CHECK(cudaMalloc(&d_values_in, num_elements_ * sizeof(float)));
+                
+                // 使用简单的转换kernel
+                int num_blocks, block_size;
+                kernel_launcher::calculate_launch_config(num_elements_, num_blocks, block_size);
+                
+                // Lambda转换kernel
+                auto convert_kernel = [] __device__ (int val) -> float { return static_cast<float>(val); };
+                
+                // 简单的类型转换（在GPU上）
+                thrust::device_ptr<int> d_int_ptr(d_int_values);
+                thrust::device_ptr<float> d_float_ptr(d_values_in);
+                thrust::transform(d_int_ptr, d_int_ptr + num_elements_, d_float_ptr, 
+                                thrust::identity<int>());
+            } else {
+                std::cerr << "MixedColumnProcessor: Value column must be FLOAT or INT type" << std::endl;
+                return result;
+            }
+        } else {
+            // 从operator结果中选择
+            if (value_column_index < 0 || static_cast<size_t>(value_column_index) >= num_outputs_) {
+                std::cerr << "MixedColumnProcessor: Invalid operator result index" << std::endl;
+                return result;
+            }
+            d_values_in = d_outputs_[value_column_index];
+        }
     }
     
     // 分配临时内存用于排序后的keys和values
@@ -757,7 +848,7 @@ MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupByAggregate(
     cub::DeviceRadixSort::SortPairs(
         d_temp_storage, temp_storage_bytes,
         d_keys_in, d_keys_out,
-        d_output_, d_values_out,
+        d_values_in, d_values_out,
         num_elements_,
         0, sizeof(int) * 8,
         stream_
@@ -770,7 +861,7 @@ MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupByAggregate(
     cub::DeviceRadixSort::SortPairs(
         d_temp_storage, temp_storage_bytes,
         d_keys_in, d_keys_out,
-        d_output_, d_values_out,
+        d_values_in, d_values_out,
         num_elements_,
         0, sizeof(int) * 8,
         stream_
@@ -905,6 +996,333 @@ MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupByAggregate(
     CUDA_CHECK(cudaFree(d_unique_keys));
     CUDA_CHECK(cudaFree(d_aggregated_values));
     CUDA_CHECK(cudaFree(d_num_runs));
+    
+    // 如果从INT列转换，需要释放临时分配的内存
+    if (value_column_index != -1 && value_source == DataSource::INPUT_COLUMN &&
+        column_types_[value_column_index] == ColumnDataType::INT) {
+        CUDA_CHECK(cudaFree(d_values_in));
+    }
+    
+    return result;
+}
+
+// 多键分组聚合
+MixedColumnProcessor::GroupByResult MixedColumnProcessor::groupByAggregateMultiKey(
+    const std::vector<int>& key_column_indices,
+    AggregationType agg_type,
+    int value_column_index,
+    DataSource value_source
+) {
+    GroupByResult result;
+    result.num_groups = 0;
+    result.is_multi_key = true;
+    
+    if (key_column_indices.empty()) {
+        std::cerr << "MixedColumnProcessor: No key columns specified" << std::endl;
+        return result;
+    }
+    
+    // 验证所有key列
+    for (int key_idx : key_column_indices) {
+        if (!validateColumnIndex(key_idx)) {
+            std::cerr << "MixedColumnProcessor: Invalid key column index: " << key_idx << std::endl;
+            return result;
+        }
+        if (column_types_[key_idx] != ColumnDataType::INT) {
+            std::cerr << "MixedColumnProcessor: All key columns must be INT type" << std::endl;
+            return result;
+        }
+    }
+    
+    // 确定待聚合的值数据源（与单键版本相同的逻辑）
+    float* d_values_in = nullptr;
+    bool need_free_values = false;
+    
+    if (value_column_index == -1) {
+        if (!d_output_) {
+            std::cerr << "MixedColumnProcessor: No compute results available" << std::endl;
+            return result;
+        }
+        d_values_in = d_output_;
+    } else {
+        if (value_source == DataSource::INPUT_COLUMN) {
+            if (!validateColumnIndex(value_column_index)) {
+                std::cerr << "MixedColumnProcessor: Invalid value column index" << std::endl;
+                return result;
+            }
+            
+            if (column_types_[value_column_index] == ColumnDataType::FLOAT) {
+                d_values_in = static_cast<float*>(columns_[value_column_index]->getDevicePointer());
+            } else if (column_types_[value_column_index] == ColumnDataType::INT) {
+                int* d_int_values = static_cast<int*>(columns_[value_column_index]->getDevicePointer());
+                CUDA_CHECK(cudaMalloc(&d_values_in, num_elements_ * sizeof(float)));
+                need_free_values = true;
+                
+                thrust::device_ptr<int> d_int_ptr(d_int_values);
+                thrust::device_ptr<float> d_float_ptr(d_values_in);
+                thrust::transform(d_int_ptr, d_int_ptr + num_elements_, d_float_ptr, 
+                                thrust::identity<int>());
+            } else {
+                std::cerr << "MixedColumnProcessor: Value column must be FLOAT or INT type" << std::endl;
+                return result;
+            }
+        } else {
+            if (value_column_index < 0 || static_cast<size_t>(value_column_index) >= num_outputs_) {
+                std::cerr << "MixedColumnProcessor: Invalid operator result index" << std::endl;
+                return result;
+            }
+            d_values_in = d_outputs_[value_column_index];
+        }
+    }
+    
+    // 创建组合键：使用简单的哈希方法组合多个键
+    // 对于每一行，计算 hash = key[0] + key[1] * 10000 + key[2] * 10000^2 + ...
+    // 这种方法假设每个键的范围不太大（< 10000）
+    long long* d_combined_keys = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_combined_keys, num_elements_ * sizeof(long long)));
+    
+    // 启动kernel组合多个键
+    int num_blocks, block_size;
+    kernel_launcher::calculate_launch_config(num_elements_, num_blocks, block_size);
+    
+    // 准备设备端的键列指针数组
+    int** d_key_ptrs = nullptr;
+    std::vector<int*> host_key_ptrs(key_column_indices.size());
+    for (size_t i = 0; i < key_column_indices.size(); ++i) {
+        host_key_ptrs[i] = static_cast<int*>(columns_[key_column_indices[i]]->getDevicePointer());
+    }
+    CUDA_CHECK(cudaMalloc(&d_key_ptrs, key_column_indices.size() * sizeof(int*)));
+    CUDA_CHECK(cudaMemcpy(d_key_ptrs, host_key_ptrs.data(), 
+                         key_column_indices.size() * sizeof(int*), cudaMemcpyHostToDevice));
+    
+    // Lambda kernel来组合键
+    auto combine_keys_kernel = [=] __device__ (size_t idx, int** key_ptrs, int num_keys, 
+                                               long long* combined_keys, size_t num_elements) {
+        for (size_t i = idx; i < num_elements; i += blockDim.x * gridDim.x) {
+            long long combined = 0;
+            long long multiplier = 1;
+            for (int k = 0; k < num_keys; ++k) {
+                combined += static_cast<long long>(key_ptrs[k][i]) * multiplier;
+                multiplier *= 100000LL;  // 假设每个键的范围 < 100000
+            }
+            combined_keys[i] = combined;
+        }
+    };
+    
+    // 使用简单的kernel来组合键
+    // 创建一个临时kernel
+    auto kernel = [d_key_ptrs, num_keys = static_cast<int>(key_column_indices.size()), 
+                   d_combined_keys, num_elements = num_elements_] 
+        __device__ (size_t idx) {
+        long long combined = 0;
+        long long multiplier = 1;
+        for (int k = 0; k < num_keys; ++k) {
+            combined += static_cast<long long>(d_key_ptrs[k][idx]) * multiplier;
+            multiplier *= 100000LL;
+        }
+        return combined;
+    };
+    
+    // 使用thrust来组合键
+    thrust::device_ptr<long long> d_combined_ptr(d_combined_keys);
+    thrust::counting_iterator<size_t> first(0);
+    thrust::counting_iterator<size_t> last(num_elements_);
+    
+    // 手动实现组合逻辑
+    // 简化：直接在CPU上创建临时host数据，然后复制到GPU
+    std::vector<long long> host_combined_keys(num_elements_);
+    std::vector<std::vector<int>> host_keys(key_column_indices.size());
+    
+    for (size_t i = 0; i < key_column_indices.size(); ++i) {
+        host_keys[i].resize(num_elements_);
+        auto* int_col = static_cast<IntColumn*>(columns_[key_column_indices[i]].get());
+        host_keys[i] = int_col->getData();
+    }
+    
+    for (size_t i = 0; i < num_elements_; ++i) {
+        long long combined = 0;
+        long long multiplier = 1;
+        for (size_t k = 0; k < key_column_indices.size(); ++k) {
+            combined += static_cast<long long>(host_keys[k][i]) * multiplier;
+            multiplier *= 100000LL;
+        }
+        host_combined_keys[i] = combined;
+    }
+    
+    CUDA_CHECK(cudaMemcpy(d_combined_keys, host_combined_keys.data(), 
+                         num_elements_ * sizeof(long long), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaFree(d_key_ptrs));
+    
+    // 分配临时内存用于排序后的keys和values
+    long long* d_combined_keys_out = nullptr;
+    float* d_values_out = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_combined_keys_out, num_elements_ * sizeof(long long)));
+    CUDA_CHECK(cudaMalloc(&d_values_out, num_elements_ * sizeof(float)));
+    
+    // 根据组合键排序
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    
+    cub::DeviceRadixSort::SortPairs(
+        d_temp_storage, temp_storage_bytes,
+        d_combined_keys, d_combined_keys_out,
+        d_values_in, d_values_out,
+        num_elements_,
+        0, sizeof(long long) * 8,
+        stream_
+    );
+    
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    
+    cub::DeviceRadixSort::SortPairs(
+        d_temp_storage, temp_storage_bytes,
+        d_combined_keys, d_combined_keys_out,
+        d_values_in, d_values_out,
+        num_elements_,
+        0, sizeof(long long) * 8,
+        stream_
+    );
+    
+    CUDA_CHECK(cudaFree(d_temp_storage));
+    d_temp_storage = nullptr;
+    
+    // ReduceByKey
+    long long* d_unique_combined_keys = nullptr;
+    float* d_aggregated_values = nullptr;
+    int* d_num_runs = nullptr;
+    
+    CUDA_CHECK(cudaMalloc(&d_unique_combined_keys, num_elements_ * sizeof(long long)));
+    CUDA_CHECK(cudaMalloc(&d_aggregated_values, num_elements_ * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_num_runs, sizeof(int)));
+    
+    temp_storage_bytes = 0;
+    
+    if (agg_type == AggregationType::SUM) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_combined_keys_out, d_unique_combined_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Sum(),
+            num_elements_,
+            stream_
+        );
+    } else if (agg_type == AggregationType::MAX) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_combined_keys_out, d_unique_combined_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Max(),
+            num_elements_,
+            stream_
+        );
+    } else if (agg_type == AggregationType::MIN) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_combined_keys_out, d_unique_combined_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Min(),
+            num_elements_,
+            stream_
+        );
+    } else {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_combined_keys_out, d_unique_combined_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Sum(),
+            num_elements_,
+            stream_
+        );
+    }
+    
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    
+    if (agg_type == AggregationType::SUM) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_combined_keys_out, d_unique_combined_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Sum(),
+            num_elements_,
+            stream_
+        );
+    } else if (agg_type == AggregationType::MAX) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_combined_keys_out, d_unique_combined_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Max(),
+            num_elements_,
+            stream_
+        );
+    } else if (agg_type == AggregationType::MIN) {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_combined_keys_out, d_unique_combined_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Min(),
+            num_elements_,
+            stream_
+        );
+    } else {
+        cub::DeviceReduce::ReduceByKey(
+            d_temp_storage, temp_storage_bytes,
+            d_combined_keys_out, d_unique_combined_keys,
+            d_values_out, d_aggregated_values,
+            d_num_runs,
+            cub::Sum(),
+            num_elements_,
+            stream_
+        );
+    }
+    
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    
+    // 获取分组数量
+    int num_groups_host;
+    CUDA_CHECK(cudaMemcpy(&num_groups_host, d_num_runs, sizeof(int), cudaMemcpyDeviceToHost));
+    result.num_groups = static_cast<size_t>(num_groups_host);
+    
+    // 复制结果到主机
+    std::vector<long long> unique_combined_keys(result.num_groups);
+    result.aggregated_values.resize(result.num_groups);
+    
+    CUDA_CHECK(cudaMemcpy(unique_combined_keys.data(), d_unique_combined_keys, 
+                         result.num_groups * sizeof(long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(result.aggregated_values.data(), d_aggregated_values, 
+                         result.num_groups * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // 将组合键解码回多个键
+    result.unique_multi_keys.resize(result.num_groups);
+    for (size_t i = 0; i < result.num_groups; ++i) {
+        long long combined = unique_combined_keys[i];
+        std::vector<int> keys(key_column_indices.size());
+        for (size_t k = 0; k < key_column_indices.size(); ++k) {
+            keys[k] = static_cast<int>(combined % 100000LL);
+            combined /= 100000LL;
+        }
+        result.unique_multi_keys[i] = keys;
+    }
+    
+    // 清理临时内存
+    CUDA_CHECK(cudaFree(d_temp_storage));
+    CUDA_CHECK(cudaFree(d_combined_keys));
+    CUDA_CHECK(cudaFree(d_combined_keys_out));
+    CUDA_CHECK(cudaFree(d_values_out));
+    CUDA_CHECK(cudaFree(d_unique_combined_keys));
+    CUDA_CHECK(cudaFree(d_aggregated_values));
+    CUDA_CHECK(cudaFree(d_num_runs));
+    
+    if (need_free_values) {
+        CUDA_CHECK(cudaFree(d_values_in));
+    }
     
     return result;
 }
